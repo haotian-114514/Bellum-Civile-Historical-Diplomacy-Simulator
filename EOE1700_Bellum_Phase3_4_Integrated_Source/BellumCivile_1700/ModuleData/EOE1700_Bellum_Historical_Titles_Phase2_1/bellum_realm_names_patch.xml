@@ -1,0 +1,26 @@
+<?xml version='1.0' encoding='utf-8'?>
+<RealmNames>
+  <!--Presentation roots keyed to EoE internal kingdom IDs; do not rename game IDs.-->
+  <Realm id="aserai" nativeName="The Alawi Dynasty" root="Alawi Morocco" />
+  <Realm id="austria" nativeName="The Archduchy of Austria" root="Austria" />
+  <Realm id="britain" nativeName="Kingdom of Great Britain" root="Great Britain" />
+  <Realm id="cossack" nativeName="Viysko Zaporozke" root="Zaporozhian Host" />
+  <Realm id="crimea" nativeName="The Crimean Khanate" root="Crimea" />
+  <Realm id="denmark" nativeName="Kingdom of Denmark-Norway" root="Denmark-Norway" />
+  <Realm id="dutch" nativeName="The Dutch Republic" root="Dutch Republic" />
+  <Realm id="genoa" nativeName="The Republic of Genoa" root="Genoa" />
+  <Realm id="germany" nativeName="Holy Roman Empire" root="Holy Roman Empire" />
+  <Realm id="ottoman" nativeName="The Ottoman Empire" root="Ottoman Empire" />
+  <Realm id="persia" nativeName="The Safavid Empire" root="Safavid Persia" />
+  <Realm id="poland" nativeName="Kingdom of Poland and the Grand Duchy of Lithuania" root="Poland-Lithuania" />
+  <Realm id="pope" nativeName="The Papal States" root="Papal States" />
+  <Realm id="portugal" nativeName="Kingdom of Portugal" root="Portugal" />
+  <Realm id="prussia" nativeName="The Kingdom of Prussia" root="Brandenburg-Prussia" />
+  <Realm id="russia" nativeName="Tsardom of Muscovy" root="Russia" />
+  <Realm id="spain" nativeName="Kingdom of Spain" root="Spain" />
+  <Realm id="sweden" nativeName="Kingdom of Sweden" root="Sweden" />
+  <Realm id="swiss" nativeName="The Swiss Confederation" root="Swiss Confederation" />
+  <Realm id="tuscany" nativeName="Grand Duchy of Tuscany" root="Tuscany" />
+  <Realm id="venice" nativeName="Republic of Venice" root="Venice" />
+  <Realm id="vlandia" nativeName="Kingdom of France" root="France" />
+</RealmNames>

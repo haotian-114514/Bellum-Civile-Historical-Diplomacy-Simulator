@@ -1,0 +1,23 @@
+﻿InternalID,EoE_Name,EoE_Culture,Proposed_Bellum_Root,Initial_Male_Rank,Initial_Female_Rank,Caution
+aserai,The Alawi Dynasty,aserai,Alawi Morocco,Sultan,Sultana,
+austria,The Archduchy of Austria,hungarian,Austria,Archduke,Archduchess,
+britain,Kingdom of Great Britain,english,Great Britain,King,Queen,
+cossack,Viysko Zaporozke,kryvian,Zaporozhian Host,Hetman,Hetman,
+crimea,The Crimean Khanate,kryvian,Crimea,Khan,Khanum,
+denmark,Kingdom of Denmark-Norway,sturgia,Denmark-Norway,King,Queen,
+dutch,The Dutch Republic,dutch,Dutch Republic,Grand Pensionary,Grand Pensionary,Heinsius is Grand Pensionary of Holland; not sovereign of the Republic.
+genoa,The Republic of Genoa,italian,Genoa,Doge,Dogaressa,Republican office needs government-mechanics treatment later.
+germany,Holy Roman Empire,german,Holy Roman Empire,Emperor,Empress,Imperial office differs from hereditary rule over HRE estates.
+ottoman,The Ottoman Empire,khuzait,Ottoman Empire,Sultan,Sultan,EoE culture is khuzait; override must be kingdom-specific.
+persia,The Safavid Empire,persian,Safavid Persia,Shah,Shah,
+poland,Kingdom of Poland and the Grand Duchy of Lithuania,polish,Poland-Lithuania,King,Queen,
+pope,The Papal States,italian,Papal States,Pope,Pope,"Ecclesiastical and elective office, not hereditary monarchy."
+portugal,Kingdom of Portugal,portuguese,Portugal,King,Queen,
+prussia,The Kingdom of Prussia,baltic,Brandenburg-Prussia,Elector,Electress,1701 starting year may precede royal coronation; stage titles dynamically later.
+russia,Tsardom of Muscovy,rus,Russia,Tsar,Tsaritsa,
+spain,Kingdom of Spain,empire,Spain,King,Queen,
+sweden,Kingdom of Sweden,finnic,Sweden,King,Queen,
+swiss,The Swiss Confederation,vlandia,Swiss Confederation,Presiding Magistrate,Presiding Magistrate,Republican office needs government-mechanics treatment later.
+tuscany,Grand Duchy of Tuscany,italian,Tuscany,Grand Duke,Grand Duchess,
+venice,Republic of Venice,italian,Venice,Doge,Dogaressa,Republican office needs government-mechanics treatment later.
+vlandia,Kingdom of France,vlandia,France,King,Queen,

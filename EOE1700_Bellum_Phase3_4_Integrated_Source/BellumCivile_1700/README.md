@@ -1,0 +1,1084 @@
+# Bellum Civile - Maintainer Guide
+
+Bellum Civile extends Mount & Blade II: Bannerlord with a connected political simulation: court factions, feudal titles, dynastic succession, internal wars, and negotiated foreign affairs. Relationships, personality, legal rights, wealth, influence, and military strength feed into these systems through shared services.
+
+This README provides a technical orientation and maintenance reference for contributors. Players can find the gameplay guide in **Encyclopedia > Concepts > Bellum Civile**.
+
+| Item | Current state |
+| --- | --- |
+| Documentation revision | October 13, 2026 |
+| Release version | Bellum Civile 1.4.4 |
+| Target game version | Bannerlord 1.4.8 |
+| Core runtime | .NET Framework 4.7.2 (`net472`) |
+| Required mod dependencies | Harmony, UIExtenderEx, Mod Configuration Menu v5 |
+| Optional integrations | Diplomacy, True Noble Opinion, Harvest and Production Overhaul (HAP), custom-banner integrations, Naval DLC / War Sails |
+| Development branch | `main` |
+| License | [CC BY-NC-SA 4.0](LICENSE.txt) |
+
+### Reading This Guide
+
+Start with the project map and invariants, then follow the section for the system being changed. Balance numbers describe compiled defaults unless a setting or modifier is named. A **day** means a campaign day; durations expressed in **years** use the campaign calendar rather than an assumed 84-day year. Relation-memory durations are quoted at the default 1x multiplier.
+
+The mod centers on term-based court agendas, three-way policy stances, separate legal and actual title hierarchies, personal succession and realm inheritance, bilateral marriage evaluation, relation memories, and score-budgeted peace treaties with hostage pledges. The sections below describe their rules, shared state, and integration points.
+
+## Contents
+
+- [Project Map](#project-map)
+- [Critical Invariants](#critical-invariants)
+- [Court Politics and Council](#court-politics-and-council)
+- [Rebellions and Claim Feuds](#rebellions-and-claim-feuds)
+- [Titles, Claims, and Service](#titles-claims-and-service)
+- [Succession, Marriage, and Households](#succession-marriage-and-households)
+- [Personal Unions and Realm Partition](#personal-unions-and-realm-partition)
+- [War and Peace](#war-and-peace)
+- [Relations and Personal Politics](#relations-and-personal-politics)
+- [Interfaces and Localization](#interfaces-and-localization)
+- [Configuration and Extension Points](#configuration-and-extension-points)
+- [Persistence and Recovery](#persistence-and-recovery)
+- [Optional Integrations](#optional-integrations)
+- [Build and Packaging](#build-and-packaging)
+- [Verification and Diagnostics](#verification-and-diagnostics)
+- [Maintenance](#maintenance)
+- [License](#license)
+
+## Project Map
+
+### Runtime Structure
+
+[SubModule.cs](SubModule.cs) initializes Harmony and UIExtenderEx, loads configuration, registers campaign behaviors and models, and schedules deferred UI work. Campaign behaviors own durable state and lifecycle events. Models and calculation services supply shared rules. Harmony patches and UI extensions connect those rules to native actions and screens.
+
+Shared records and services mostly live at the project root. Campaign owners are under `Behaviors/`, native interception under `Patches/`, ViewModels/extensions under `UI/`, and assets under `GUI/` and `ModuleData/`. Several large behaviors are split into partial-class files; inspect those files before assuming the main behavior contains the complete lifecycle.
+
+| Area | Primary entry points and responsibilities |
+| --- | --- |
+| Court membership and pressure | [FactionManagerBehavior](Behaviors/FactionManagerBehavior.cs), [IdeologyBehavior](Behaviors/IdeologyBehavior.cs), `RebellionPowerHelper.cs` |
+| Political scheduling | [CourtAgendaBehavior](Behaviors/CourtAgendaBehavior.cs) and its partial files; objectives, mandates, crises, and execution receipts |
+| Council | [PrivyCouncilBehavior](Behaviors/PrivyCouncilBehavior.cs), `PrivyCouncilAssignmentRegistry.cs`, `CouncilIncidentRegistry.cs`, appointment and controversy behaviors |
+| Internal conflicts | `CivilWarConflictBehavior`, `CivilWarResolutionBehavior`, `InternalPeaceSettlementBehavior`, `ClaimFeudBehavior`, `ClaimFeudWarBehavior`, `ConflictCallResponseBehavior` under `Behaviors/` |
+| Titles and ownership | [FeudalTitleBehavior](Behaviors/FeudalTitleBehavior.cs), `FeudalTitlePlayerActionService.cs`, `FeudalTitleUsurpationAssessmentService.cs`, `FeudalTitleConfig.cs` |
+| Title presentation | `FeudalTitleDisplayHelper.cs`, `RealmSovereignSelection.cs`, `RealmNameConfig.cs`, `DynamicKingdomTitleNameHelper.cs`, `Patches/FeudalTitleHeroNamePatch.cs` |
+| Crown succession | [CrownAccessionBehavior](Behaviors/CrownAccessionBehavior.cs), elective succession, hereditary loyalty, succession challenge, regency, and dynastic-heir behaviors |
+| Estates and realms | [PartitionSuccessionBehavior](Behaviors/PartitionSuccessionBehavior.cs), `FeudalInheritancePlanner.cs`, `Behaviors/CrownPartition*.cs`, `Behaviors/CrownRealmUnion*.cs`, shared `RealmUnion*.cs` services |
+| Marriage | [StrategicMarriageBehavior](Behaviors/StrategicMarriageBehavior.cs), `Behaviors/BellumMarriageEvaluation.cs`, household/health/political helpers, `SpecificMarriageProposalBehavior` |
+| War readiness and targeting | [WarPeaceRevampBehavior](Behaviors/WarPeaceRevampBehavior.cs), [WarTargetScoringService](WarPeace/WarTargetScoringService.cs) |
+| Conflict score | [WarScoreBehavior](Behaviors/WarScoreBehavior.cs), [PeaceReadiness](PeaceReadiness.cs) |
+| Treaties | [ForeignTreatyBehavior](Behaviors/ForeignTreatyBehavior.cs), `TreatyAiDraftService.cs`, `TreatyDraftService.cs`, `TreatyRatificationService.cs`, `TreatyWarScoreAccounting.cs` |
+| Hostages and clients | `HostagePactBehavior`, `RetainedTreatyPrisonerBehavior`, `HouseholdRansomBehavior`, `ClientKingdomBehavior` under `Behaviors/` |
+| Relations | [DynamicRelationBehavior](Behaviors/DynamicRelationBehavior.cs), `DynamicRelationBaselineHelper.cs`, `RelationMemoryService.cs`, `RelationMemoryRecord.cs` |
+| Shared spending | [NpcInfluenceBudgetService](NpcInfluenceBudgetService.cs); reserves, payments, refunds, and telemetry |
+| Settings and saves | `BellumCivileSettings.cs`, `BellumCivileOptions.cs`, `BellumCivileConstants.cs`, [BellumCivileSaveDefiner](BellumCivileSaveDefiner.cs) |
+
+### Models and Decisions
+
+`BellumFeudalClanFinanceModel` supplies title/service accounting and visible council salaries. `BellumClanPoliticsModel` adds council influence. Council settlement models wrap patrol, militia, construction, and food calculations. `DynamicArmyManagementModel` applies military authority and army modifiers. `DynamicSuccessionModel`, `BellumMarriageModel`, and `BellumAgeModel` connect succession, matching, and adulthood to native systems.
+
+Fief, policy, expulsion, and council deliberation behaviors prepare their respective votes; `DelayedVoteReliability` handles stale decisions and pending records. Bellum-created decisions must enter through `IdeologyBehavior.AddDecisionAsModAction` where required, so native-decision interception does not block Bellum's own proposals.
+
+Wrapped models capture the model already registered at startup and delegate unrelated calculations to it. This is why load order matters for economy and diplomacy integrations. Army management, succession, and marriage have their own registered models; do not assume every model uses the same wrapping strategy.
+
+### Shared Terminology
+
+| Term | Meaning in this project |
+| --- | --- |
+| House / clan | A noble family and its engine `Clan`; household membership can change without erasing a person's dynastic rights |
+| Realm / kingdom shell | The engine `Kingdom` that owns political membership, wars, policies, and decisions |
+| Crown | A sovereign political title; its legal tree can outlive or differ from its kingdom shell |
+| De jure / de facto | Legal ownership and hierarchy / actual possession and hierarchy |
+| Agenda / motion | Scheduled political business / the specific action or objective selected for it |
+| Filing mandate | A faction leader's time-limited authority to submit a policy or council proposal |
+| Elective mandate | The sitting ruler's term of office, governed by realm law |
+| Receipt / journal | Saved evidence of a completed action / the record coordinating a multi-stage transition |
+
+## Critical Invariants
+
+- **Legal ownership and possession are separate.** De jure titles establish rights and legal hierarchy. De facto control determines possession, service, military authority, and displayed rank. Capture alone does not confer legal ownership.
+- **A campaign kingdom and a legal Crown are different objects.** Temporary war kingdoms conduct conflicts without becoming sovereign legal roots. A legitimate Crown may survive destruction or absorption of its kingdom shell.
+- **Court affiliation does not create a military alliance.** Calls to arms require a qualifying title-vassal, marriage, or friendship tie; ideology can modify acceptance.
+- **The court agenda schedules NPC political business.** Do not restore independent random meeting or vacancy schedulers. Player rulers retain paid, on-demand actions under ordinary legal rules.
+- **The ruler cannot occupy a council seat.** Appointment, dismissal, and override powers do not make the ruler a candidate.
+- **Peace willingness, treaty acceptability, and War Score are separate.** Exhaustion encourages settlement; it cannot authorize unavailable terms or over-budget demands.
+- **The revamp toggle is a behavior boundary.** With it off, native war and peace must remain functional. With it on, foreign peace uses the Parley lifecycle, including redirects from stale native decisions.
+- **Saved decisions are not rerolled on load.** Preserve heirs, agenda dates, selected targets, ballots, and legal history. Repair impossible references conservatively.
+- **Multi-stage transfers require evidence of completion.** A started native action is not proof that it returned successfully. Reconcile journals before retrying irreversible work.
+- **Presentation refreshes do not rewrite rights.** XML/style changes may refresh configured names, but preserve legal owners, historical origins, and explicit player renames.
+- **Identifiers are stable; names are presentation.** Never use localized text as a save key, title identity, or integration lookup.
+- **Optional integrations remain optional.** Core systems must load without their assemblies. Cache reflection and report unsupported paths without corrupting campaign state.
+
+## Court Politics and Council
+
+### Crown and Court Blocs
+
+Permanent realms have three member blocs: **Nobility**, **Glory**, and **Liberty**. The **Crown** represents the ruling house separately.
+
+| Bloc | Main interests |
+| --- | --- |
+| Nobility | Landed rights, claims, hierarchy, noble representation, and dynastic diplomacy |
+| Glory | Military standing, campaigns, conquest, subjugation, and victory |
+| Liberty | Prosperity, trade, peace, limits on royal power, and shorter elective mandates |
+
+Affiliation combines personality, political position, and bounded social ties. Membership and leadership are reviewed through the court term lifecycle. The ruler cannot be an ordinary member. Legacy faction identities remain reserved for save migration.
+
+Joining or leaving creates no direct relation award or penalty. A live condition supplies +10 for shared affiliation or -10 for different blocs within the same realm. Unaffiliated and cross-realm pairs receive neither.
+
+The ruler may favor a bloc once per term for **100 influence**, or remain impartial for free. NPC choices respect influence reserves. Favor can extend applicable faction-objective support to the ruler without making the Crown a faction member.
+
+### Terms, Motions, and Mandates
+
+Ordinary agendas open once per configured term, default **one campaign year**. Membership and leadership settle before motion selection. Eligible blocs normally require two houses. Registered candidate sources propose weighted, valid business; a bloc without viable business waits for the next term.
+
+Player faction leaders receive **Approve / Block / Substitute** choices. Taking leadership at term opening also triggers review of the pending motion. Substitution exposes eligible alternatives and has an influence cost. Policy and council motions can grant a filing mandate: the leader uses the normal Policies or Privy Council buttons during that window. Missing an unused mandate angers the faction; unrelated decisions do not consume it.
+
+The agenda saves dates, targets, deadlines, outcomes, and execution receipts. Success, failure, invalidation, and player neglect are distinct results. An objective can encourage war, marriage, trade, or peace without guaranteeing acceptance by the relevant parties.
+
+| Motion family | Main owners and purpose |
+| --- | --- |
+| Laws and council | Eligible blocs propose policies or appointments; Nobility seeks longer elective terms and Liberty shorter ones |
+| Campaigns and claims | Glory pursues war, subjugation, and rallying; Nobility pursues claimant campaigns and title grants |
+| Foreign relations | Nobility pursues dynastic marriage/alliance objectives; Liberty pursues peace and trade |
+| Crown government | Land/title grants, treason/revocation business, faction accommodation, and council replacement |
+| Crown foreign affairs | Seeking protection, preparing client liberation, and granting a barony to a client |
+| Crises and activities | Political challenges, council vacancies, feud peace enforcement, and mood-driven session activities |
+
+The **player ruler does not receive the NPC annual Crown business invitation**. Existing policy, council, title, and expulsion interfaces remain available. Special prerogatives live in **Crown Actions**. Non-rulers see a disabled control with an explanation. Current agenda reflects active proceedings without imposing another scheduling gate on the player.
+
+| Crown Action | Cost and reuse rules |
+| --- | --- |
+| Appease a court faction | 100 influence plus 25 per member house; +20 mood accommodation; one full-term cooldown across appeasement targets; cannot stack or refresh |
+| Prepare for liberation | 100 influence; +20 Liberty Desire preparation; one full-term cooldown; ordinary readiness and declaration rules still apply |
+| Seek foreign protection | 100 influence even if refused; one full-term cooldown after sending the appeal |
+| Grant land to a client | 100 influence plus the transferred holding; excludes the last fief, sieges, disputes, wartime occupations, and pending distribution |
+| Enforce Peace | Existing feud-specific influence calculation, scaling with the participants' hierarchy tiers; foreign-war and eligibility rules still apply |
+
+Cooldowns are saved per realm and action, not reset by switching a target or ruler. This is separate from the active benefit: ruler replacement ends an appeasement accommodation, while changed rulership or clientage ends liberation preparation. See `Behaviors/CourtPlayerCrownActions.cs` and `Behaviors/CourtCrownActionCooldowns.cs` for presentation and receipts.
+
+### Mood and Policy Stances
+
+Mood ranges from -100 to +100. Material baselines reflect landholding, law, centralization, welfare, war, and council representation. Event shocks are separate; their temporary history entries use the rule that magnitude `N` remains listed for `N` days. This display duration is not a personal relation-memory duration or a replacement for an activity's saved lifetime. Mood-driven activities compete in the agenda pool rather than running as an independent scheduler.
+
+[ModuleData/bellum_policy_agendas.xml](ModuleData/bellum_policy_agendas.xml) distinguishes **Support**, **Neutral**, and **Oppose**. Unlisted non-Crown policies are neutral. Crown-designated centralizing policies use current bloc mood:
+
+| Mood | Effective stance |
+| --- | --- |
+| 20 or below | Oppose |
+| Above 20, below 60 | Neutral |
+| 60 or above | Support |
+
+[CourtPolicyStanceRules.cs](CourtPolicyStanceRules.cs) supplies the shared rule. Eligibility, voting, mandates, and card colors use the same stance: blue for support, untinted for neutral, red for opposition. Material policy interests remain separate from mood-baseline calculations to prevent a feedback loop. Reactions use pre-outcome stances, so a result's own mood shock cannot redefine betrayal retroactively.
+
+### Political Power and Challenges
+
+Projected conflict power combines military strength and influence with eligible direct vassals, same-realm marriage allies, and close friends. Wealth is not added. Supporters are counted once, opposing commitments are excluded, and mood affects expected commitment. The Crown belongs to the loyalist side.
+
+At the ordinary rebellious mood threshold of **-60**, a bloc can challenge the ruler when projected support is credible. Other hostile blocs may form a grand coalition. Emergency -100 attempts have bounded retry rules. These conflicts seek abdication through the appropriate succession handler; faction mood cannot manufacture a throne claim.
+
+### Privy Council
+
+The Council appears inside `Court of {SOVEREIGN_TITLE_NAME}` in the Factions tab. Its short territorial name comes from the title hierarchy rather than `Kingdom.Name`.
+
+| Office | Permanent role |
+| --- | --- |
+| Marshal | Delegated authority to summon the realm host when restricted feudal calls are enabled |
+| Chancellor | Competence-based motion discounts for the councillor's faction and mitigation of unresolved feud pressure |
+| Seneschal | Improves feudal service income reaching the Crown |
+| Spymaster | Acts as the realm's intrigue proxy and modifies offensive/defensive intrigue |
+| First Advisor | Additional council support; unlocks above 30 towns and castles |
+| Second Advisor | Additional council support; unlocks with an empire-tier sovereign title |
+
+Sustainable core offices are limited by eligible council clans, up to four. Unsustainable vacancies are excused. Every occupied seat grants its clan daily influence and a competence-scaled salary. Salary enters the clan-finance model and its named breakdown, not an invisible separate daily payment. `PrivyCouncilOfficeRecord` saves `HolderClanId`; runtime calculations resolve the councillor through that clan's current leader.
+
+Tooltips show competence, contributing skills, controversy, support, and assignment effects. Candidate competence appears in appointment voting. A nomination ballot produces three candidates for the kingdom decision. The player's realm receives deliberation and persuasion/bribery dialogue; NPC-only appointments can resolve synchronously at their scheduled session.
+
+Named Crown and court-faction appointment motions reserve one ballot place for their eligible nominee; the other places follow the nobles' nomination ranking. The same shortlist rule is used for AI forecasts and restored decisions. NPC sponsors favor their own nominee unless they have an explicit voting pledge, while ordinary influence costs and reserves still apply. Sponsorship guarantees consideration, not victory. Existing nominee eligibility and NPC vacancy-recovery rules remain in force.
+
+**Appoint** costs 100 influence before applicable Chancellor discounts. A faction leader needs an active mandate; a player ruler can file directly. **Dismiss** is ruler-only, costs 100 influence, applies grievances/mood effects, and leaves a vacancy. Overrides have their own influence and relation costs.
+
+Captured councillors retain their office, tenure, salary, influence and court representation under both player and NPC rulers. Their duties pause, controversy rises by **0.5 per day**, and normal daily recovery stops. Captivity subtracts **10 points** from the incumbent's appointment support score, or **20 points for a Marshal during war with another kingdom**. These are score penalties, not percentage-point deductions from displayed court support. Release removes the temporary penalty and resumes duties and recovery.
+
+Captive incumbents remain eligible for retention votes; other captive nobles cannot become new appointees. Replacement motions follow normal support, term, cooldown and influence rules, without a capture-triggered emergency queue. At **100 controversy**, any councillor, including an advisor or player, is dismissed through the ordinary disgrace process. A new holder begins with cleared controversy and a default assignment. Existing saves retain old dismissal history and valid pending proceedings; previously dismissed holders are not automatically reinstated.
+
+### Competence, Controversy, and Support
+
+`PrivyCouncilBehavior.CalculateCompetence` combines two skills and one attribute:
+
+| Office | First skill | Second skill | Attribute |
+| --- | --- | --- | --- |
+| Marshal | Tactics | Leadership | Endurance |
+| Chancellor | Charm | Steward | Social |
+| Seneschal | Steward | Trade | Intelligence |
+| Spymaster | Roguery | Scouting | Cunning |
+| Advisors | Charm | Leadership | Social |
+
+Each skill contributes up to 40 points after clamping to 0-300; the attribute contributes up to 20 after clamping to 0-10. Raw competence therefore ranges from 0 to 100. Advisor bonuses can change effective core-office competence. Assignment benefit and drawback multipliers use that effective value; 50 is their neutral baseline. Do not substitute a candidate's raw competence for the incumbent's effective runtime value when displaying assignment effects.
+
+Core-office controversy attributes failures to the responsible office: military reverses to the Marshal, diplomatic/court failures to the Chancellor, economic distress to the Seneschal, and hostile intrigue to the Spymaster. Successes can reduce it. Repeated military events are capped. Ruler controversy derives from core-office controversy and sustainable vacancies and feeds rebellious intent.
+
+`PrivyCouncilOfficeRecord.Controversy` is clamped to **0-100**, not an unbounded accumulator. All occupied offices, including advisors, recover **0.1-0.3 controversy per day** according to competence while their holder is free. Core-office recovery uses effective competence; advisor recovery uses the advisor's own competence. Support separately measures political security through competence, relations, representation, appointment history, monopolies, and current conditions. Low support is not the same as high controversy.
+
+The UI uses the following bands, with each lower bound inclusive:
+
+| Value | Competence | Controversy | Support |
+| --- | --- | --- | --- |
+| 0 to below 20 | Inapt | Unblemished | Isolated |
+| 20 to below 40 | Mediocre | Questioned | Contested |
+| 40 to below 60 | Average | Contentious | Accepted |
+| 60 to below 80 | Skillful | Scandalous | Respected |
+| 80 to 100 | Masterful | Ruinous | Entrenched |
+
+Compatibility integrations should read these as separate metrics, not label a controversial office as a contested vote. Presentation is in `CouncilCompetencePresentation.cs` and `UI/VanillaTabs/Kingdoms/Factions/PrivyCouncilVM.cs`.
+
+### Assignments and Incidents
+
+Assignments normally have a **30-day change cooldown**. Captivity preserves the selected assignment and its change date, suspends its effects and drawbacks, and prevents new assignments until release. The office's permanent operational benefits also pause; professional competence remains visible. `None` gives no administrative benefit and costs one relation per week with a free, sidelined councillor. The following are baseline effects; competence scales applicable costs/drawbacks and incidents can modify results. Tooltips show effective values.
+
+| Office | Assignment | Baseline effect and tradeoff |
+| --- | --- | --- |
+| Marshal | Organize Patrols | About 10% larger patrols, 15% faster formation; protection failures cause 25% more controversy |
+| Marshal | Train the Militia | +10% positive militia growth and veteran chance; -10% village production |
+| Marshal | Oversee Logistics | -15% army cohesion loss and army-party food consumption; weekly controversy |
+| Chancellor | Appease the Nobility | About +1 relation weekly with an estranged loyal vassal, up to +25; weekly controversy |
+| Chancellor | Improve Foreign Relations | About +1 relation weekly with an estranged neighboring ruler at peace, up to +25; weekly controversy |
+| Chancellor | Fabricate Grievances | Ruling-house fabrication 25% faster with +5 percentage points discovery risk; weekly controversy |
+| Seneschal | Audit Vassals | +10% feudal service income to the Crown; weekly controversy |
+| Seneschal | Subsidize Infrastructure | +10% construction; 50 denars per stronghold daily, only when the full cost is affordable |
+| Seneschal | Stockpile Provisions | Up to +2 food per stronghold daily; 30 denars per stronghold, all-or-nothing funding; HAP uses market requisition instead |
+| Spymaster | Counter-Espionage | +15 defensive intrigue, +5 percentage points hostile-claim discovery, -5 offensive intrigue |
+| Spymaster | Uncover Dissent | 15% slower covert rebel growth, +10 percentage points hostile-claim discovery; weekly controversy |
+| Spymaster | Sow Rumors | +15 offensive intrigue, -5 defensive intrigue; weekly controversy |
+| Advisor | Counsel the Crown | +5 effective core-office competence; two advisors cap at +8 |
+| Advisor | Mediate the Council | +5 support and about -1 weekly controversy at the worst core office; combined caps +8 and -1.5 |
+| Advisor | Represent Court Interests | +5 faction mood baseline and -5 rebellious intent; same-faction representation does not stack |
+
+`CouncilIncidentBehavior` runs incidents only for a player ruler. Reviews occur every 14-35 days, with a 10% roll per eligible assignment and at most one incident opened. Individual incidents have an 84-day cooldown. Full effects last 30 days and limited trials 15. Each assignment has three definitions in `CouncilIncidentRegistry.cs`.
+
+### Deliberation and Voting
+
+The default **five-day** deliberation applies in the player's realm to fief grants, policies, expulsion/treason, and council appointments. Clan leaders explain their intentions through dialogue, with eligible persuasion/bribery. NPC-only proceedings use their immediate-resolution paths. Crown succession has a separate standing election/accession lifecycle.
+
+Vote persuasion and bribery remain available while either participant is serving in an army, including royal-election and mandate-reform lobbying. Normal eligibility, negotiation deadlines, and pledge/payment checks still apply.
+
+Successful persuasion and bribery in these four deliberations secure at least the minimum influence-funded vote for the promised choice. `VotePledgeService` lets that minimum cross the NPC's ordinary reserve; larger support tiers still obey the budget. New promises require enough actual influence for all outstanding promises, and barter confirmation rechecks affordability before payment. The reservation index is rebuilt from existing saved pledge records, without new save fields. Invalid ballot choices or subsequent loss of the required influence cause abstention with a notice at resolution. Native discounts and losing-vote exemptions remain intact. Crown elections and mandate-reform pledges retain their separate rules.
+
+Fief candidates are weighted by claims, need, title rank, proximity, clan tier, relations, and support. Anti-monopoly pressure limits repeated grants to overlanded houses. Treason confiscation returns fiefs to ordinary distribution. The direct high-treason decree retains its separate dialogue path.
+
+Unassigned-fief ballots remain open when their proposer abstains, including abstention caused by the influence reserve. Genuine permission, realm, and sponsor failures still cancel them. `FiefAllocationRecovery.cs` retains the original deadline, capture context, exclusions, and nominations through ballot handoff and saving. An interrupted allocation resumes without another full deliberation or announcement. Recovery is bounded; an exhausted record allows native allocation instead of restarting Bellum's delay. Awards, new captures, and invalid ownership clear obsolete records. Removal diagnostics include the ballot deadline and the ruler's siege status. Vanilla's 48-hour participation deadline is separate from Bellum's deliberation: a player ruler still resolves an overdue ballot, while a vassal's participation can expire.
+
+When changing votes, check both deliberation and the final decision. `DelayedVoteReliability.cs` validates pending records, duplicate decisions, retries, and orphaned unassigned fiefs.
+
+## Rebellions and Claim Feuds
+
+### Rebel Movements and Solidarity
+
+Rebellious Intent combines grievances, mood, ruler controversy, demesne hoarding, culture, claims, rank, land need, relations, and personality. The default threshold is **100**. Armed movement types are **Independence**, **Abdication**, and **Install Ruler**. Claims and feuds replace the former redistribution rebellion.
+
+Political membership uses cause-specific legitimacy and relationship rules. Power is checked at escalation and when joining an active war. A succession crisis can accelerate an existing claimant movement.
+
+Direct title-vassals, same-realm marriage allies, and close friends can receive calls to arms. Acceptance weighs duty, relations, personality, cause, ideology, and strength. Side-choice and messenger popups preserve player control. Mercenaries on the Crown's payroll are excluded from private-feud recruitment. Defection persuasion is blocked for active feud/civil-war participants where it would conflict with reintegration.
+
+### Claim Feud Lifecycle
+
+1. A claimant builds political pressure and gathers supporters.
+2. The ruler can hear the dispute while it is still political.
+3. Parties accept or defy judgment.
+4. Defiance can create temporary kingdoms for a contained private war.
+5. Victory, concession, white peace, enforcement, or invalidation ends the conflict and reintegrates the houses.
+
+The player initiates their own feuds through the Factions tab; AI ambition checks do not act on the player's inherited claims. NPC claims against the player remain valid. Petition closes once private war begins.
+
+A supporting player can **Leave** before or during war. Wartime withdrawal returns the house and its possessions to the parent realm and creates a ten-year **Oathbreaker** memory: -20 with the former side's leader and -10 with its other participants. Leaders use their dedicated settlement rules.
+
+### Settlement and Enforcement
+
+Civil wars and feuds share scoring/readiness infrastructure with foreign wars but retain their own terminal handlers. White peace ends the dispute without judgment. Install Ruler, Abdication, and independence must reach the appropriate political resolution before generic cleanup.
+
+Royal **Enforce Peace** applies to private claim wars, not open rebellions or grand coalitions. The player's Crown Action retains its foreign-war, eligibility, and influence requirements. An NPC ruler considers a crisis override when a substantial foreign attack threatens a realm distracted by feuds; advance notice precedes the decree. Enforcement returns the houses without awarding the disputed claim.
+
+Close war stances before deleting feud records or temporary kingdoms. A legitimate realm destroyed by a third party during civil war uses a separate successor-recovery path.
+
+### Post-War Tribunals
+
+Eligible victors receive a tribunal; player judgment is deferred until the correct ruler has authority. Abdication waits for succession. Successful independence does not grant jurisdiction over the former liege: departing houses instead receive a -25 **War of independence** house memory lasting 15 years at the default multiplier.
+
+Outcomes include pardon (+25 for 10 years), confiscation of the most prosperous fief (-15 for 20 years), eligible landless exile (-20 for 25 years), and execution. Execution invokes death consequences and does not automatically confiscate a fief. NPCs consider execution first (10% base, Mercy-adjusted), then landed confiscation (20% base, Generosity-adjusted), otherwise pardon. Base chances are configurable.
+
+Faction reactions are additional to personal memories. Affected-member reactions use +10 for pardon, -10 for confiscation/exile, and -30 for execution, summed and capped at +/-30 per faction per tribunal; Liberty retains its separate clemency reaction. Check tribunal and shock handlers together when altering penalties.
+
+## Titles, Claims, and Service
+
+### Legal Hierarchy and Possession
+
+Tiers are **Barony, County, Duchy, Kingdom, Empire**. Baronies bind to towns and castles; upper titles organize legal territory and service. Records retain identity, legal/actual parents, legal/actual holders, root status, settlement binding, claims, and custom names.
+
+Displays use **(de facto only)** for possession without legal ownership and **(de jure only)** for legal ownership without possession. Full ownership has no suffix. The highest de facto title supplies displayed rank. A legal Crown can remain as a vacant historical root after its campaign realm disappears.
+
+### Claims and Fabrication
+
+Claims arise from fabrication, marriage, inheritance, dynastic succession, dispossession, and other legal transfers. They retain a carrier: strong claims can pass to the next generation as weak claims; weak claims expire with their carrier. Duplicate clan/title claims are normalized rather than stacked.
+
+Marriage grants the receiving house strong claims to the spouse's parental-house titles through the shared claim service. Current marriage birthrights and possible future inheritances are separate matchmaking considerations.
+
+Fabrication defaults to **three campaign years**, configurable from one to ten. Targets include lieges, neighbors, held territory, same-realm opportunities, and immediate child titles below a held title. A child captured into another realm can remain eligible.
+
+| Target tier | Initial gold | Initial influence |
+| --- | ---: | ---: |
+| Barony | 50,000 | 50 |
+| County | 75,000 | 75 |
+| Duchy | 100,000 | 100 |
+| Kingdom | 125,000 | 125 |
+| Empire | 150,000 | 150 |
+
+Checks occur at **33%, 66%, and completion**, using the same risk formula with current skills and council modifiers. Early failure presents a saved scribe inquiry: pay 25% of the original gold investment, repeat the affected stage without rerolling that failed checkpoint, or abandon. Final failure exposes the forgery; success grants a weak claim. NPCs choose using target value and reserves.
+
+Abandonment and exposure impose one- and two-year same-target cooldowns. Technical invalidation retains refund rules. Tooltips distinguish stage risk from final success, not the chance of passing all checks without a setback.
+
+**Renounce** removes a player's weak/strong claim to a title they do not control. It does not transfer land. Live claimant relation penalties disappear when their qualifying claim is gone.
+
+### Usurpation, Revocation, and Transfers
+
+Usurpation normally requires a claim, payment, and **more than half** of effective subordinate control units. `FeudalTitleUsurpationAssessmentService` finds the nearest active descendant tier, so a kingdom without duchies can still be evaluated through counties or baronies. A zero-child title has no artificial denominator. A legal holder may recover a vacant upper title without a redundant claim, subject to control and cost checks.
+
+Claimed revocation requires immediate de facto liege authority, a different same-realm holder, a claim to the target, 100 influence, and no conflicting feud commitment. Defiance can start a revocation war. Legal ownership of a higher title alone does not create political authority over a foreign ruler.
+
+Transfer handlers capture existing rights before synchronization. **Temporary Crown custody pending distribution must not create free claims or legal ownership**, including confiscated land. Dispossession preserves appropriate claims; voluntary grants and barter use their relinquishment rules. Barter can convey the seller's legal rights, not a third party's.
+
+### Formation, Reorganization, and Drift
+
+Formation normally needs at least two contiguous same-tier children. Detaching children from an existing legal parent requires full legal and actual control. Changes are validated before rebinding; eligible empty non-sovereign parents are then cleaned up.
+
+Overlapping active feuds block holder-driven reorganization/dissolution. Ordinary claims, fabrication, and drift are not blanket vetoes. Disregarded claimants receive a ten-year **Disregarded our ancestral claims** house memory: -15 for weak rights or -30 for strong rights, once per affected house using its strongest claim. Secret fabrication is not exposed by confirmation. Automatic orphan cleanup remains more conservative.
+
+`Rename` requires legal and actual control. `Dissolve` applies to eligible non-sovereign upper titles and reparents surviving children. Sovereign reorganization must preserve a viable original Crown and cannot take independent vassal structures; it can create a coequal Crown for later partition.
+
+Drift defaults to **25 campaign years**. Temporary civil-war/feud membership does not reset permanent-realm progress. Each title has its own clock; a newly eligible parent does not restart children. Surviving titles keep history through reorganization; a newly formed upper title does not inherit a dissolved title's elapsed time.
+
+Drift requires a suitable, fully controlled higher legal receiver. A title cannot drift into itself or an equal/lower rank. This preserves separate coequal Crown trees in a union. Blocked reasons appear in hierarchy tooltips.
+
+### Service, Grants, and Naming
+
+Immediate de facto links define liege/vassal service. Service Owed redirects subordinate income and affects summons costs/eligibility. `BellumFeudalClanFinanceModel` accounts for transfers without double-taxing village income. With restricted summons enabled, the ruler and Marshal can call the full host; other nobles use their hierarchy and permitted exceptions.
+
+Player vassals can grant eligible baronies to companions through subinfeudation dialogue. The new house joins under the existing title structure. Possession-only grants preserve third-party rights; full legal grants carry the larger formation reward. Ruler companion grants use native dialogue with Bellum ownership handling. AI grants weigh land need and strategic/economic value.
+
+Styles support holder, female holder, consort, landless house-head, mercenary-leader, and optional wanderer honorifics. `spouseRank`/`femaleSpouseRank`, `landlessLeaderRank`/`femaleLandlessLeaderRank`, and `mercenaryLeaderRank`/`femaleMercenaryLeaderRank` fall back to existing forms when omitted. Hero, party, army, and encyclopedia descriptions share styling services.
+
+Realm rank follows the highest de facto title. The **Realm Name Display** selector provides three presentation modes:
+
+- **Native:** original game or conversion-mod names.
+- **Realm Identity:** the current sovereign rank combined with the realm's configured or remembered identity.
+- **Sovereign Title** (default): the current sovereign rank and territorial title name, including title presets and player title renames.
+
+`DynamicKingdomTitleNameHelper` is the shared realm naming service. It supplies full names to kingdom names, encyclopedia titles, and Bannerlord's formal-name helper, and rank-free roots to `InformalName` for links and dialogue. Unknown identities and temporary rebellion/feud realms keep their native names. Realm renames affect Realm Identity; legal title renames affect Sovereign Title. Neither operation silently renames the other.
+
+The service keeps localized `TextObject` roots and formats intact, caches full/short projections by title display revision, ruler, mode and language, and preserves native names during save collection and serialization. No new campaign save fields are required. The retired MCM boolean migrates to Realm Identity when off and Sovereign Title when on; an existing selector value takes precedence. An optional adapter updates Artem's Better UI Visuals map labels in both naming modes without rebuilding borders or changing its settings. Configuration precedence is documented below.
+
+## Succession, Marriage, and Households
+
+### Laws and Crown Accession
+
+Realm laws have one saved selection per group: **Gender**, **Succession**, and **Elective Term Duration**.
+
+| Group | Choices |
+| --- | --- |
+| Gender | Male Preference, Female Preference, Equal, Male Only, Female Only |
+| Hereditary Crown succession | Primogeniture, Ultimogeniture, Seniority, Kinship |
+| Elective Crown succession | Elective Seniority, Military Acclamation, Tanistry, Shura Council |
+| Elective term | 1, 5, or 10 years; lifetime |
+
+Hereditary accession follows the lawful personal line using saved transition records. A temporary transfer problem does not replace a valid heir. Heirless cases retain an emergency election. Realm-law profiles, personal Crown rights, and household estate sorting have explicit bindings; they are not interchangeable calculations.
+
+An heir and their recorded incoming household are unavailable for new marriages while Crown settlement is pending. Ordinary future Crown heirs remain eligible. Hourly recovery can refresh an unexecuted household plan if the heir has already changed clan, retaining the original heir, Crown, cause, and laws. Once a cadet, payment, property transfer, or foreign-clan move has been committed, its saved receipts are preserved rather than rebuilding the package. `Behaviors/CrownHouseholdRecovery.cs` owns this guard and recovery path.
+
+Elective realms maintain standing nominations and support during the ruler's life. Law merit contributes 60% and political preference 40%. Military strength plus influence determines standing voting power, not an expenditure. Weighted nominations produce up to three finalists; finalist-house self-support applies after nomination, subject to promises and player choices. Death, abdication, and term expiry freeze the final ballot. Acceptance and challenges are separate from candidate selection.
+
+Term reform affects the sitting mandate. Fixed-to-fixed keeps its start date; lifetime-to-fixed starts at adoption; fixed-to-lifetime removes expiry. An already elapsed mandate schedules an election after notice/deliberation rather than immediately replacing the ruler. Loading an old save alone does not retrospectively change its mandate.
+
+House inheritance uses the current realm's laws, cultural defaults for independent clans, and generic Male Preference Primogeniture as the final fallback. Clan leadership and landed inheritance are separate: the clan encyclopedia identifies the clan successor and previews estate beneficiaries. Noble pages show expected inheritances, or outstanding assets from recorded pending allocations, including for nobles who do not lead a house. These previews reflect current circumstances rather than guaranteeing a future award. The player can disable legal-heir enforcement for playable succession without changing the world's legal rules.
+
+New ordinary landed inheritances stay within the deceased's permanent realm. Eligible blood relatives may belong to another domestic house; foreign houses and separate client kingdoms are excluded. Temporary civil-war and feud allegiance is resolved to the parent realm. Gender and succession laws still order eligible relatives, including minors. When no eligible domestic blood heir remains, the recorded ordinary estate reverts to the realm's Crown; taking leadership of the surviving house does not itself confer blood inheritance rights. Sovereign Crown succession and personal unions retain their separate cross-border rules, with explicit Crown-package boundaries rather than an exemption for every Kingdom-ranked title or every estate owned by royalty.
+
+`EstateInheritancePolicy` builds the on-demand allocation used for new external-house/reversion snapshots and encyclopedia previews. Existing in-house partition keeps its established executor and Crown-first package allocation. Political Crown eligibility does not restore a property share already received as an inheritance advance. `CrossClanEstateRecord.PolicyVersion` is zero for older saved awards, which retain their recorded recipients, including pending foreign awards. Version-one ordinary shares recheck domestic eligibility before delivery; unstarted invalid awards follow an eligible recorded successor or revert to the Crown. Partial deliveries retain their receipts, can finish with an eligible successor in the same receiving house, and defer conflicting house changes. Completed unions provide a verified successor realm for outstanding domestic delivery. Possession delivery preserves legal parentage and origin; a separate inheritance step transfers legal ownership and refreshes drift. These transfers do not immediately integrate land into another de jure realm.
+
+Mixed estates can coordinate ordinary awards to other domestic houses with the separation of an additional Crown. `PendingPartitionSuccessionRecord.MixedEstate` links the existing Crown batch to the original death-estate allocation; the death-estate scheduler owns retries and completion. When the retained Crown's heir is already the ruling house's lawful head, political accession completes first without marking the estate delivered. The batch then prepares the separating Crown, delivers ordinary shares, reconciles their actual hierarchy, and settles gold, claims and announcements once. An heir receiving both a Crown and an ordinary share receives both in the newly founded house, without duplicating their treasury share. Legal parentage and origin remain unchanged for ordinary titles.
+
+This route requires a settled hereditary ruling house, an eligible adult founder from that house for each separating Crown, and compatible territorial and diplomatic conditions. Other existing recipient houses must remain with the retained realm. Captivity, active military duties, minority, regency or conflicting ownership can postpone delivery; incomplete native callbacks retain their receipts rather than being replayed. Before native delivery starts, an invalid ordinary beneficiary can follow the recorded domestic successor rules without reallocating the assets. Earlier partially delivered estates retain their original executor. Ordinary external-house estates, foreign sovereign integration and entirely in-house Crown partitions keep their established paths.
+
+### Regency and Adulthood
+
+An underage lawful heir becomes a ward. An eligible adult relative acts as engine-facing clan leader; a generated cultural noble covers houses without a suitable adult. The ward takes leadership at adulthood. Regents receive appropriate styling and remain ordinary members after handover.
+
+With legal-heir enforcement enabled, player regency allows control of a regent until a deferred, safe handover to the ward. Accession and partition remain regency-aware, so the acting adult does not become the hereditary beneficiary.
+
+Custom adulthood defaults to **16**, configurable from 16 to 21. Education milestones default to **2, 5, 8, 10, 13, 15** and normalize into strictly increasing ages below adulthood. Completed stages are preserved. Disabling the option restores native ages; changes require restart. Marriage minimum ages are clamped to adulthood.
+
+Strict gender-only laws exclude the opposite gender from title succession. If the lawful line is extinct, an engine-valid leader can preserve the house while title escheat follows its own rules. A living underage heir is not extinction.
+
+### Strategic Marriage
+
+Matching runs a staggered annual house search. **Both houses evaluate the actual household outcome**: continuity, fertility, members retained/lost, status, relations, useful alliances, political interests, and transferable claims. Healthy houses can prioritize strategic ties; endangered houses relax status demands and prioritize continuity. Sending a daughter or other member away is not inherently a veto.
+
+A reproductive marriage sending a blood relative to another house adds up to 30 acceptance points for the outgoing kinship tie. This benefit scales down to zero at maximum household risk; it does not waive departure penalties or the other house's consent. It is shared by ordinary and royal matchmaking.
+
+NPC matchmaking protects the first lawful Crown heiress in hereditary realms and the first lawful clan heiress under the house's succession laws. These women require a matrilineal household: the husband joins their clan. Elective realms protect the clan successor, without presuming inheritance of the elected Crown. A prospective husband who must remain as a leader or first lawful successor cannot be moved instead. Other marriages retain ordinary household placement, and both houses still need at least 95 acceptance; there is no extra matrilineal bonus.
+
+Voluntary NPC marriages also cannot remove the house's last realistic bloodline-continuation option. Remaining blood children, viable unmarried relatives, and existing reproductive households preserve that option; army duty and captivity do not erase them. Household health remains a weighted consideration when alternatives exist. `MarriageHouseholdPolicy` caches heir and continuity lookups per evaluation, and `NpcMarriageClanContext` preserves the accepted destination through native wedding callbacks. The optional native NPC marriage path uses the same household protections when Bellum's strategic marriage logic is enabled.
+
+New offers to the player evaluate both permitted household arrangements and choose the one with the highest NPC acceptance, keeping ordinary placement on an equal score. This includes willing husbands joining women in the player's clan. Each arrangement must meet the NPC's 95 acceptance threshold and preserve its house's first lawful heir and last viable continuation. The native offer popup identifies patrilineal or matrilineal placement, the departing spouse, destination house, future children's household, and any departing Crown heir's retained rights. Sending the player's own nonleader heir away requires an additional confirmation. Existing marriages and pre-update pending offers are not migrated to new household terms.
+
+Specific-marriage dialogue supports selecting both candidates, paginated large households, and choosing the husband's or wife's house. **Deliberate player negotiations can secure the departure of an NPC first heir or sole viable continuation of the family line**, for either sex, with the usual heir premium and house-health compensation. They cannot move a current or legal clan head, the main character, or a pending accession household. A player clan leader can bring an heir into their house; another eligible clan member can instead join the heir's house. NPC matchmaking and unsolicited offers retain their heir and bloodline-continuation protections. Personal courtship uses the same pricing and final legality checks. Hereditary Crown rights survive the household move, and later accession may establish a separate ruling branch. Explicit treaty marriage placement retains precedence and its own eligibility restrictions. A favorable match does not promise an automatic realm alliance or an unearned inheritance package.
+
+`PlayerMarriagePricing` normalizes the native NPC-side valuation regardless of barter constructor order. The nonnegative native compensation is multiplied by `1 + 0.5 * min(4, max(0, NPC tier - player tier))`. An outgoing first clan heir adds **50,000 denars**, or **100,000** for a first hereditary Crown heir instead. Sending a viable bloodline member away adds up to **50,000** according to house-health risk. A reproductively useful spouse joining the NPC house instead discounts the base cost by up to **50%** at maximum risk. Fixed heir premiums are not tier-multiplied; matrilineality itself has no fee. Quotes cache their snapshot per barter item, use bounded arithmetic, and do not change NPC-to-NPC scoring.
+
+`PlayerMarriageAgreementBehavior` saves each new offer's original houses and exact destination beside the native offer/waiting-list state. Temporary unavailability can postpone an accepted wedding; changed eligibility cancels it rather than switching houses. The queued pair's own engagement is ignored only during its validation/wedding. Barter preflight checks all offered marriage items before payment; the wedding also pins the agreed household through native callbacks. Save definition 128 and its list container are appended without renumbering existing types.
+
+A mutually acceptable ordinary match blocked by army duty or temporary unavailability can become a **30-day saved prospect**. Its first retry is scheduled for the following day, then every three days. Bellum reserves the pair against its other matches and rechecks legality and consent for the recorded destination before execution. Invalid/expired prospects cancel. Court dynastic accords use their named couple, recorded household, and term deadline instead.
+
+Matching shares short-lived house-health, kinship, claim, and political calculations. A pending prospect retries its pair without repeating the world search.
+
+### Cadet Households and Mercenary Companies
+
+Marriage preserves personal Crown rights without immediately creating a cadet house. Later accession can require a separate ruling house; the saved plan handles household and estate delivery. Existing children do not automatically move with an incoming Crown heir. Separate-household newborns follow their mother's current clan. Cadets inheriting recognized custom house banners receive independent, exact copies, including all colors, layers and strokes. Vanilla-style houses retain the generated cadet-banner path.
+
+Before Crown household transfer, saved child-move entries are removed unless the child has already joined the recorded cadet house. Completed transfers and estate receipts are preserved. Ordinary estate partitions and inheritance concessions retain their own household rules.
+
+`CadetClanNameBuilder` supplies names for ordinary partitions, Crown households, abdications and succession challenges. Territorial branches try their principal inherited holding or residence, then its villages, using localized cultural formats. Unlanded branches fall back to the existing family name without adding its cultural prefix or suffix again. When a Crown accession separates an heir from their spouse's house, the royal dynasty's recorded family components stay first, followed by any distinct marital-house components in their existing order. Components are compared without regard to case or whitespace differences, with no fixed component limit: `dey Meroc-Pethros` and `Pethros-Mestricaros` produce `dey Meroc-Pethros-Mestricaros`. Unknown legacy or player-created hyphenated surnames remain intact rather than being guessed apart.
+
+`Behaviors/PartitionCadetNaming.cs` checks names against all clans, including eliminated houses, and pending estate plans. Once place alternatives are exhausted, collisions use Roman numerals (`dey Rovalt II`, `dey Rovalt III`). New plans recheck availability immediately before creating the clan. `CadetNameRecord`, saved in the partition behavior's `BC_CadetClanNames` dictionary and new accession plans, preserves the family components for future generations. Existing clans and older literal-only plans are not renamed. Player renames invalidate the old components; there is no daily naming scan. The `--cadet-names` harness covers naming rules, plan reservations, localization and save definitions.
+
+Dynamic mercenary evaluation defaults to once every **five years per house**. Adventurous adults not due to inherit may join a cultural company or found one. Defaults are **10 companies**, three adult officers, and starting tier two. Zero prevents new departures/formations; lowering the cap does not destroy existing companies. Companies use local troops and configurable cultural names.
+
+Player relatives can depart too. In-party dialogue offers financial support (25,000 denars), blessing, persuasion, or refusal with possible defiance. Away relatives send a letter. Company descriptions preserve known founding history rather than inventing missing ancestry.
+
+## Personal Unions and Realm Partition
+
+### Inheriting a Second Realm
+
+A union can occur when an **already-ruling lawful heir** inherits another Crown through a supported hereditary death accession. Both realms must be permanent, independent, hereditary, and possess distinct, fully held coequal political Crowns. Elective elections, abdications, emergency successions, and arbitrary diplomatic mergers are outside this route.
+
+The heir's existing realm survives. The inherited realm's noble houses join peacefully, mercenary contracts end, and the source kingdom is retired only after delivery is verified. The survivor keeps its government, policies, court, and primary sovereign identity. The inherited Crown retains its legal vassal tree. Equal-rank drift remains prohibited.
+
+An heir who does not yet rule a foreign Crown follows accession/household handling rather than automatically absorbing their current host realm. Eligibility to inherit two Crowns is not itself a union: the accession must actually occur.
+
+### Absorption Sequence and Recovery
+
+[RealmUnionSnapshotService.cs](RealmUnionSnapshotService.cs), [RealmUnionSequence.cs](RealmUnionSequence.cs), and the `CrownRealmUnion` partial files own this path:
+
+1. Validate accession, sovereignty, source membership, title ownership, military availability, and political conflicts.
+2. Capture Crowns, title parents/holders, clans, holdings, influence, debt, banners, and diplomatic obligations.
+3. Preflight and transfer compatible agreements through their specific adapters.
+4. Transfer and verify the inherited Crown.
+5. Move noble houses, terminate mercenary contracts, and restore recorded clan state where native moves alter it.
+6. Verify source emptiness and obligations before retiring the kingdom shell.
+7. Reconcile the outer accession and publish the localized union announcement once.
+
+Compatible alliances, trade agreements, tribute, and client commitments can pass to the survivor. Conflicts defer the union; they are not silently discarded. Foreign war alignment, client subordination, active decisions, armies, sieges, and internal conflicts can block preparation or completion. Any non-ended hostage pact involving a participating realm also defers preparation; the current route does not reassign active pledges to a new sovereign.
+
+`RealmUnionRecord` distinguishes **started**, **returned**, **verified**, **announced**, and **completed** work. An interrupted native transfer must be reconciled against current state. Do not clear its receipt and replay it as if nothing happened. Announcements are chat messages, not an extra mandatory decision popup.
+
+### Later Inheritance Splits
+
+Partition can separate fully held coequal Crown packages among eligible heirs. Secondary Crowns take allocation priority in the journaled Crown batch. A **fully held common higher legal ancestor** binds those Crowns together; an unrelated higher title does not. The legal vassal tree stays with its assigned Crown.
+
+Successor realms inherit applicable laws/policies and recorded ongoing foreign enemies. **Alliances, trade agreements, tribute, and client states stay with the surviving primary realm.** Hostage pledges are not copied: a non-ended pact defers this preparation until its custody lifecycle is resolved. This deliberately differs from absorption, where compatible source commitments can transfer to the survivor.
+
+The Crown batch captures estate shares, residence/allegiance plans, households, titles, holdings, treasury delivery, and government/court work. Completion verifies the batch before finalizing and announcing separation. Holding two Crowns does not guarantee a split: heirs, bindings, residence, legal control, and delivery must all qualify.
+
+### Ordinary Estate Partition
+
+The older landed-estate route remains distinct. It can promote a coequal inherited title below kingdom rank, such as a sovereign duchy, when spare inheritable fiefs remain after the primary heir's reserve and the secondary heir receives a qualifying title and holding. Its guard checks whether the parent holds any higher title fully, rather than using the Crown batch's common-ancestor test.
+
+Do not assume that the journaled Crown batch's recovery guarantees cover this older route. Relevant code is in `FeudalInheritancePlanner.cs`, `PartitionSuccessionBehavior`, the `CrownPartition` partial files, and estate delivery/settlement helpers. Changes to union or partition handling should be checked in native campaigns and across save/load, alongside isolated contract tests.
+
+## War and Peace
+
+### War Will and Enemy Selection
+
+The **War and Peace Revamp** is enabled by default. War Will expresses a clan's enthusiasm; targeting chooses whom it wants to fight. War Score measures leverage; treaty utility evaluates a particular settlement.
+
+War Will starts around **45**, recovers in peace, and responds to ideology, losses, captures, events, and simultaneous fronts. All ideologies can eventually reach 100. Ordinary war proposals require 75; an additional foreign front raises the effective requirement to 90 and adds combined-danger checks. The target sanity floor is 10.
+
+Motives include claims, cultural territory, frontier/maritime access, relations, treaties, marriage, prosperity, vulnerability, and all existing fronts. Military opportunity/danger can reach +/-35; a formal alliance contributes -50. The strongest aggregated motive supplies declaration/vote argument text. Temporary feud realms are not normal foreign targets.
+
+StoryMode's protected conspiracy wars are excluded from passive fatigue, extra-front opening penalties, and positive-shock damping. Combat losses and strategic danger still count. Quest-required total victory remains protected from ordinary settlement.
+
+### War Score Components
+
+`WarScoreBehavior` maintains a signed **-100 to +100** ledger from the attacker's perspective. Civil wars, feuds, and foreign wars share scoring infrastructure and have different terminal handlers.
+
+| Component | Baseline |
+| --- | --- |
+| Occupied town / castle | 15 / 10 |
+| Retaken core fief | +5 objective value |
+| Village raid | 1; component capped at 15; each village credited once per side per conflict |
+| Battle | Severity-scaled, with major-battle weighting; component capped at 40 |
+| Captive noble / heir / ruler | 2 / 8 / 15; component capped at 25 |
+| Ordinary ticking leverage | 0.1 per day to the advantaged side, capped at 25 |
+| Feud objective | Replaces ordinary ticking: 1 per completed uninterrupted day of control, capped at 50 |
+| Landless-war pressure | Separate pressure for realms starting without fiefs; prevents immunity through an empty occupation denominator |
+
+Prisoner leverage reflects **current qualifying custody**. Release, escape, rescue, or death removes it. Feud control loss clears the former holder's objective accumulation; the next controller starts at zero. Repeated capture/raid cycles cannot repeatedly award the same objective shock. Collapse and conflict objectives have additional terminal handling.
+
+### Peace Readiness
+
+There is **no fixed minimum war duration**. The configurable **War Duration Reluctance Period** defaults to 100 days. [PeaceReadiness.cs](PeaceReadiness.cs) centralizes willingness; [BellumCivileConstants.cs](BellumCivileConstants.cs) supplies thresholds.
+
+With elapsed days `d`, enthusiasm `e` clamped to 0-100, absolute score `s`, reluctance period `P >= 1`, and `clamp01(x)` limiting a value to 0-1:
+
+```text
+r = clamp01(e / 10)
+Exhaustion           = (20 - e) * 0.5 + 35 * (1 - r)
+Early-war reluctance = -max(0, P - d) * (100 / P) * r
+Inconclusive war     = -30 * clamp01((50 - s) / 50) * r * clamp01((90 - d) / 60)
+Prolonged exhaustion = +30 when d >= P and e < 10, otherwise 0
+Readiness            = sum of these four components
+```
+
+The early penalty fades with age and is softened below 10 enthusiasm. Prolonged exhaustion is a **one-off utility contribution**, not an accumulating daily bonus. Individual evaluation adds terms and politics; readiness alone is not a yes vote.
+
+Automatic mutual white peace requires absolute score **<=10**, both strength-weighted effective enthusiasm values **<=10**, and readiness **>=11** on both sides. Ordinary internal concession requires winner-relative score **>=50**, loser enthusiasm **<10**, and readiness **>=11**. After the reluctance period, score **>10** and zero loser enthusiasm can permit concession, avoiding an indefinite 11-49 stalemate. Decisive 100-score outcomes, enforcement, invalidation, and scripted protections retain their own paths.
+
+### Peace Parley and Ratification
+
+`ForeignTreatyBehavior` owns opening, AI drafting, council assessment, ratification, execution, and cleanup. The Parley displays both councils, score, terms, commitments, ruler choices, and predicted outcome.
+
+- Rulers edit **Fiefs, Prisoners, Politics, and Wealth** demands/offerings and choose Accept or Reject.
+- Vassals vote Yay, Nay, or Abstain, with 25/75/150 influence commitments; they cannot edit terms.
+- Mercenaries do not participate in sovereign votes; AI resolves those proposals.
+- Overrides cost influence and have relation consequences. Rejection reactions follow clans' actual position on the treaty, not an automatic reward for refusal.
+- There is no minimum-participation quorum. With no votes, an NPC ruler uses their own assessment and a player ruler decides explicitly. No opposition means no override payment, not exemption from legal/budget checks.
+- Internal wars expose restricted white-peace/concession outcomes, not general foreign territorial bargaining.
+
+Rejected voluntary foreign treaties have a **seven-day minimum automatic retry window**, with early reconsideration for significant military changes. Expiry does not force a proposal. Explicit player negotiation and forced settlement remain separate. Repeated penalty application is guarded.
+
+### Budgets and Demands
+
+Players can assemble excessive drafts. The opposing council receives **Enemy making unreasonable demands: -1000**, with excess shown in the UI. **Final ratification/execution rejects over-budget settlements**, including capitulation and ruler overrides. Repair may remove invalid terms but must not silently trim valid excessive player demands.
+
+Offering credit equals half the offered value, capped at half the side's base War Score and at an absolute 50 additional points. Excess offerings can improve recipient utility without increasing budget. The side-relative calculation is shared by players and NPCs.
+
+| Term | Baseline cost |
+| --- | --- |
+| Occupied castle / town | 20 / 30 War Score |
+| Unoccupied fief | Occupied cost multiplied by 1.5 |
+| Fief prosperity | +1 per 500, capped at 12,000 prosperity; claims can discount cost |
+| Noble prisoner | 5 base, with leader/heir/ruler premiums |
+| Concede Defeat / Discredit / Humiliate | 10 / 20 / 30; mutually exclusive prestige tiers |
+| End Trade Agreement / End Alliance | 10 / 25 |
+| Royal Marriage | 30 |
+| Reparations | 5,000 denars per War Score by default |
+| Tribute | 250 denars daily per War Score for 100 days by default |
+
+Prestige tiers transfer renown/influence: Concede +/-15 and +/-30; Discredit +/-30 and +/-60; Humiliate +/-50 and +/-100. The latter tiers add ruler-relation fallout. Other terms cover vassal release, vassalization, active rebel demands, client release/clientage, and hostage pledges. Size-scaled costs prevent cheap absorption of large realms.
+
+NPC winners target earned leverage and compare compromises through both councils. Affordable reparations/tribute use remaining granular budget. Winners penalize unused actionable leverage beyond `max(5, ceil(10% of budget))` at 1.5 utility per point. Reserves, collective wealth, and the full tribute burden bound affordability. Exhaustion does not validate an impossible financial demand.
+
+### Territory and Ordinary Prisoners
+
+The Fiefs picker supports **Recognize {CLIENT}'s possession of {FIEF}** for eligible client occupations. Linked dungeon prisoners contribute to a fief term's cost. Removing a linked prisoner removes that fief term; prisoners can also be selected independently.
+
+Already distributed occupations are not sent through a second allocation vote. Unoccupied transfers use temporary-Crown custody and normal distribution. Garrison transitions must remove hostile ownership safely.
+
+Unexchanged foreign nobles can remain captive after peace under retained-prisoner handling. Dungeon/mobile escape chances default to 1%/3%. The household broker can arrange relative/companion ransom, and clan tooltips explain available routes. Treaty summaries group land, payments, politics, and prisoners; native peace announcements remain.
+
+### Hostage-Backed Pacts
+
+Treaties can demand or offer a blood relative of the supplying ruler for **50 days by default**. Children are eligible. Succession standing supplies four base prices: first heir 30 WS, second heir 24, third heir 18, and later heirs or other eligible relatives 12. The price is `base + (days - 50) / 10`; voluntary pledges use shared half-value offering credit.
+
+Duration is negotiated in the parley's Politics tab, from 30 to 1,000 days in ten-day steps. A single control updates both reciprocal pledges and their costs. The duration MCM slider is removed. Duration and pricing are saved before handover and retained through delivery recovery. Existing pacts keep their saved expiry; records without a duration snapshot retain their original 100-day agreement. Pending legacy clauses retain tier-only pricing and arbitrary previously configured durations until explicitly repriced by the duration control. Legacy zero-day pacts still resolve on the next daily tick. New pricing is identified by appended save fields, with absent fields selecting legacy validation.
+
+Both councils assess the duration once per pact, not per hostage: no penalty through 50 days, then -2 utility per ten days through 100, -4 through 200, and -6 thereafter. Exhaustion below 10 can add up to +15 recovery utility, increasing between 50 and 100 days and never growing beyond 100. Existing hostage-family reluctance remains separate and unchanged. Legacy pending clauses do not acquire these new duration modifiers until repriced.
+
+NPC drafting normally prefers 50 days, or 100 with strength-weighted realm enthusiasm below 10. Complete exhaustion after at least 200 days of war permits a 150-day preference; after 400 days it permits 200. The shortlist always includes 50 and 30, and never exceeds five durations or 200 days, including capitulation. It is independent of surplus war score. Rejected initial drafts can be retried with shorter hostage terms without rebuilding dynasty candidates; those fallbacks do not recursively generate further alternatives. Player-authored longer pacts face the same council evaluation, while existing forced-capitulation rules still apply. Draft-selection logs include the chosen duration for campaign balance audits.
+
+Hostages remain in their own house but enter protected custody in an eligible captor stronghold. Ordinary escape, ransom, and manual release are blocked. Encyclopedia/clan descriptions identify treaty custody; the broker explains why ordinary ransom is unavailable.
+
+Expiry or replacement of either recorded ruling house ends the arrangement through its return lifecycle. War removes protection. NPC captors choose release, ordinary captivity, or execution using personality, aggression context, and chance; player captors receive a choice. Retained captives resume escape, ransom, rescue, and prisoner-score rules. Pacts discourage attacks rather than absolutely prohibiting them.
+
+Dungeon dialogue permits honorable early return or dishonorable execution with confirmation, relation memories, and honor-trait effects. Reciprocal hostages use the other ruler's response, not guaranteed release. Protected hostages must not reach ordinary release dialogue that awards relations despite failing to release them.
+
+### Client Kingdoms
+
+Map and conversion mods can declare historical clientage with top-level `StartingClientage` entries in `bellum_feudal_titles.xml` or active-module `bellum_feudal_titles_patch.xml` files. These require exact client/suzerain kingdom IDs and `submission="Voluntary"` or `"Forced"`; optional `liberationCooldownDays` defaults to 0 and delays liberation rather than expiring clientage. Later patches replace the whole entry by client ID; `remove="true"` cancels an earlier declaration. Both shipped XML files contain commented examples. Terminology presets cannot create clientage.
+
+Only a new-game event arms initialization, which runs after session setup. It validates permanent realms and a flat client/suzerain graph before changing diplomacy. Starting clients follow the suzerains' wars, including across opposing client blocs; their independent wars and incompatible commitments are cleared before protected alliance/trade creation. No title transfers, submission relation rewards/penalties, notifications of a new submission, or court agenda credit are generated. Existing saves are untouched. Interrupted initialization retains the chosen declarations and cooldown dates; completion consumes the pending plan, so subsequent loads cannot recreate a liberated client. Native call-to-war votes are suppressed only during this startup alignment.
+
+Clients maintain a forced alliance/trade agreement, follow their suzerain into wars/peace, and cannot independently pursue conflicting diplomacy or ordinary wars. Liberation requires the clientage's binding period to expire (one year for clientage created during gameplay), realm and proposing-clan Liberty Desire of at least 60, and at least 100% strength readiness. Readiness uses clan military strength plus influence: client clans contribute 50%, 75%, or 100% at desire below 40, 40-59, or 60+, against the suzerain plus half the power of its other clients and allies, counted once each. The required client-to-bloc ratio starts at 80% and follows the existing ruler-personality adjustments. Suzerain collapse releases clients.
+
+Liberty Desire combines submission type, lawful suzerainty through the title hierarchy, culture, opinion, marriage ties, court faction, personality, and active Crown preparations. The realm average is weighted by clan military strength plus influence. For liberation proposals and council votes, each clan gains 0.75 resolve per personal desire point above 60, capped at +30. Effective willingness is War Will plus resolve, capped at 100; proposals require 75. Resolve is calculated on demand and does not alter stored War Will or peace evaluations. NPC preparation viability uses the same formula with the projected +20 desire bonus. Influence costs, reserves, strategic target requirements, and the declaration vote still apply. `BuildDebugReport` lists actual War Will, resolve, and effective willingness for each clan.
+
+The map widget and Kingdom Diplomacy client entries share `ClientLibertyTooltip`. Its compact layout shows the suzerain, Liberty Desire with a Content (below 40), Restless (40 to below 60), or Defiant (60+) status, and Liberation Readiness against the 100% power requirement. A short explanation identifies the current obstacle or readiness to propose liberation, with any remaining binding period shown separately. Weighted desire causes (including individual 0-100 limits) and the most defiant clan complete the tooltip. Readiness measures military strength plus influence, not the probability of rebellion; proposal eligibility and council approval remain separate requirements. Widget colours use unrounded desire so they change at the actual thresholds. Hovering refreshes the assessment in either view. Proposal previews use `PeekWarWill`, read-only influence assessments, and targeted strategy scoring without publishing AI preferences or recording spending attempts. Strategy/permission checks are deferred until the realm and a candidate clear the cheaper gates.
+
+The Crown can grant an eligible personally held barony to a client, excluding pending distribution. This is direct for player rulers and rare/situational for NPC agendas. The client ruler receives +25 relations for ten years at the default memory multiplier, capped at +50 from active grants. Only the donor's own legal rights accompany the land; higher titles and historical boundaries remain intact.
+
+A weak threatened realm can seek protection; acceptance includes joining its defensive war. Liberation preparation encourages the existing path rather than bypassing declaration rules.
+
+Client peace propagation and occupation recognition exist. **Full shared-war contribution accounting and independent-allied negotiation/consent are not implemented as one combined war system.**
+
+## Relations and Personal Politics
+
+### Layers and Scope
+
+Relations are calculated for eligible individual hero pairs, including regular nobles, same-house relatives, and notables. Eligibility requires living, enabled, non-child characters and excludes a character's relation with themselves. Additional clan checks filter unsupported minor factions and some pairs of independent non-player houses. `DynamicRelationBehavior.ShouldAffectPair` and `IsEligibleHero` are authoritative; individual support does not mean every possible character pair is eligible.
+
+House-scoped events remain attached to the houses and survive changes of leader. Same-clan and notable pairs use personal event scope rather than applying a house grievance against itself. True Noble Opinion integration preserves individual identity.
+
+Noble relations combine a natural foundation, live political conditions, and memories. Foundation includes personality/culture and family bonds. Conditions include claims, title relationships, court alignment, wars, and captivity. Notable pairs use event memories without the noble foundation/political baseline. The implementation does not generate a global table of every hero pair.
+
+Only one applicable family bond contributes: parent/child **+20**, siblings or spouses **+15**, close extended kin **+5**. Marriage's live bond is separate from the temporary native wedding reward. Charm affects applicable event gains through normal paths rather than a permanent baseline.
+
+Contested claims give one non-stacking pair penalty: **-10 weak** or **-20 strong**. De jure title-desire conditions can accumulate by title. Prisoner possession ends on release; noble-prisoner donations use separate memories lasting **2 years**, capped at +20 in total.
+
+### Lifetime and Migration
+
+Ordinary timed memories retain full value until expiry. Named contexts cover quests, rescues, battles, losses, appointments, promises, and other recognized events. Unrecognized native/third-party changes use a generic timed fallback.
+
+**Killed my enemy** grants a +5 personal memory lasting **10 years**. These duration defaults apply to new memories; existing records retain their saved expiry dates.
+
+Normal expulsion and non-execution treason judgments share the same friendship reaction: other clan leaders serving the realm who have more than +10 relations with the expelled leader receive a **-5 personal memory for 10 years**, labelled **Expelled my friend from the realm** with the expelled leader's name. This includes mercenary leaders with qualifying friendships. Execution reactions and the expelled house's own grievances remain separate.
+
+The duration multiplier is **0.25x-5x**, default 1x. New memories scale centrally. Changes rescale remaining duration, not elapsed history; permanent conditions and expired records are unaffected. The saved last-applied multiplier prevents double scaling. Durations use campaign years (`CampaignTime.DaysInYear`).
+
+Two migration concepts must remain distinct:
+
+- **Prior personal history** is temporary, with base duration `abs(value) / 3` years, bounded to 0.25-10 years before scaling. Migration preserves the immediate total and prevents expired history from being recreated.
+- Legacy **Prior history** from the drifting model retains migration-only fading so loading does not abruptly change visible relation.
+
+`RelationMemoryService` owns contexts/durations. `DynamicRelationBehavior` owns records/integration; `DynamicRelationBaselineHelper` owns natural/political calculations. Foundation and political caches are bounded and separate from durable memories. Expiry uses indexed pairs and lazy checks.
+
+Mod-owned gameplay changes should use an explicit, localized memory source rather than a raw `ChangeRelationAction` call. This includes treaty consequences, feud judgments, forgery scandals, council work, intrigue, cadet founding and political reactions. `ApplyChangeWithDefaultDuration` adds context while retaining the generic fallback lifetime based on the actual applied delta (including native modifiers and clamping); use it for recurring effects unless a distinct lifetime is intended. These labels apply to new events, without rewriting existing generic memories.
+
+Player and AI title usurpation share a **-30 house memory lasting 20 years**. Manual and court title grants use a **10-year personal memory**. Title revocation and cadet founding use house scope; their existing amounts and default lifetimes are preserved. Sovereign-departure penalties apply to former realm clan leaders excluding serving mercenaries. The `--gameplay-relation-memories` harness checks effect contexts, duration preservation and a method-level allowlist of intentional raw relation writes.
+
+### Exile and Asylum
+
+`ExiledClanRecoveryBehavior` preserves eligible landless NPC noble houses and owns their automatic search for a new realm. Ordinary departure and kingdom-destruction events record the origin immediately; legal expulsion records its forced cause. Failed searches retry no sooner than **seven days**, checked daily. Weekly backfill catches otherwise untracked independent houses. Child-only surviving families remain protected from discontinuation but wait for an eligible adult representative before relocation.
+
+Departure history persists separately from a current asylum request. Automatic return to the realm that expelled a house is blocked while the **expelling ruling house** remains in power. Voluntary departures have a **30-day** return cooldown; rebellious departures and direct defections use **90 days**, followed by distrust fading over one campaign year. Realm destruction is not betrayal. Temporary civil-war/feud movements and protected inheritance transfers do not create departure penalties. An explicit invitation from the player ruler can pardon that realm's recorded restriction.
+
+`RefugeSelectionHelper` compares eligible permanent, landed realms in one pool. The exile weighs ruler/court relations, culture, family ties, enemies of the origin, return distrust and capped desperation. NPC rulers separately weigh relations, court support, culture, family ties, strategic usefulness, clan tier, room for another house, Mercy and Generosity. **Ruler relation <= -60 always refuses admission**, regardless of other benefits or the exile's lack of alternatives. Automatic petitioners also avoid rulers they hate at that threshold. Desperation affects only the exile's preference, never the receiving ruler's acceptance.
+
+Players retain the asylum inquiry and may refuse. A refusal excludes their realm for the current exile episode. Native automatic recruitment delegates eligible exiles to the same scheduler; recruitment dialogue and barter check NPC admission again before transfer or payment. Scripted transfers continue to use native actions directly. New history uses existing registered dictionary types; older saves retain current exile exclusions without inventing a historical expelling dynasty. The `--exile-recovery` harness covers boundaries, history persistence, retries, admission and recruitment guards; an in-game save/load remains part of release validation.
+
+### Intrigue and Influence
+
+Player rulers can send companions on clandestine missions. NPC subterfuge uses staggered checks. Operations affect court mood, rebels, money, troops, and exposure. The Spymaster is the intrigue proxy when available; otherwise the ruler is. Captured/disabled agents and ended conflicts require cleanup.
+
+`NpcInfluenceBudgetService` centralizes voluntary AI spending. Every NPC clan has a **100-influence base reserve**, with independent **+100** bonuses for being at foreign war, leading an army, and being the ruling clan. Each bonus applies once per clan, regardless of enemy or army count. The role reserve therefore ranges from **100 to 400**; a ruler leading an army during a foreign war retains 400. Temporary civil-war and feud opponents do not count as foreign wars. Discretionary actions retain the larger of the role reserve or action cost; council commitments retain the role reserve; Crown emergencies use a **100** floor. Outstanding voting promises can raise the protected amount above the role reserve. Involuntary losses and player spending do not use this policy.
+
+These are Bellum spending floors, not native vote prices. Native fief support costs 20/60/100 influence before discounts and is scaled by preference and available influence without a fixed leftover reserve. Native random proposals have separate eligibility thresholds (including the general 100-influence gate). Without an army-leadership bonus, an ordinary Bellum minimum fief vote requires 120 influence for a non-ruling clan or 220 for a ruler in peacetime, before discounts and other commitments. Secured minimum voting pledges use the exception described above. Influence telemetry reports both the base-reserve and current role-reserve shortfalls.
+
+## Interfaces and Localization
+
+### Kingdom and Map Screens
+
+| Surface | Implementation and content |
+| --- | --- |
+| Factions | `UI/VanillaTabs/Kingdoms/Factions/`; court, Council, rebel/feud groups, Crown Actions, and mandates |
+| Hierarchy | `UI/VanillaTabs/Kingdoms/Hierarchy/`; legal/actual trees, claims, service, and selected-title action dropdown |
+| Succession Laws | `UI/VanillaTabs/Kingdoms/Succession/`; inline Policies panel, laws, heirs, and elective standings |
+| Peace Parley | `UI/Parley/`, `GUI/Prefabs/Parley/BellumPeaceParley.xml` |
+| Diplomacy Overview | Wars, native alliances, Bellum hostage pacts, and clients in a bounded scroll area alongside Stats |
+| Map widgets | `UI/Map/`, `GUI/Prefabs/Map/`; War Score and Liberty Desire, independently configurable |
+
+Overview hovers reuse score, alliance expiry, custody/duration, and Liberty Desire services. Direct client/suzerain relationships appear only under Client States instead of duplicating forced alliances. War widgets follow the player's actual conflict shell and include only relevant feuds.
+
+Extensions add titles, offices, claims, relations, succession, policy tints, and prisoner guidance around native nodes. Preserve dimensions and hitboxes. Passive location/tooltip overlays must not block member selection. Refresh existing ViewModels where possible instead of recreating widgets every tick.
+
+### Encyclopedia Concepts
+
+[ModuleData/bellum_concepts.xml](ModuleData/bellum_concepts.xml) contains **31 articles**, including the overview. The manifest registers native `Concepts` XML for `Campaign` and `CampaignStoryMode`. [Patches/EncyclopediaConceptFilterPatch.cs](Patches/EncyclopediaConceptFilterPatch.cs) adds **Bellum Civile** to the existing Types filter rather than a separate intersecting group.
+
+The overview links to all specialist articles and each links back. Titles, bodies, and filter have **63 English localization entries**. Native pages supply scrolling, bookmarks, and navigation. Articles explain gameplay in the native conceptual style; implementation details belong here.
+
+### Localization Contract
+
+Player-facing text uses stable `TextObject` IDs with matching English in [ModuleData/Languages/EN/strings.xml](ModuleData/Languages/EN/strings.xml). Preserve named variables and concept-link tokens in translations. Configurable title/name presets have separate presentation data and patch support.
+
+When changing text, update both fallback and source entry. For concepts, also update shipped article XML and verify links. Runtime articles are self-contained; the private manuscript under `docs/` is not loaded by the game.
+
+Use `BellumCivileNotifications` for optional political chat messages. Its Disabled, Kingdom Only, and Global settings filter ordinary events; explicitly personal messages still appear, and major events also appear under Kingdom Only. A required inquiry or pending decision is a separate interaction and must not depend on optional chat visibility.
+
+## Configuration and Extension Points
+
+### MCM and Defaults
+
+[BellumCivileSettings.cs](BellumCivileSettings.cs) declares MCM. Runtime callers use [BellumCivileOptions.cs](BellumCivileOptions.cs) for safe access/defaults. [BellumCivileConstants.cs](BellumCivileConstants.cs) contains compiled balance values. Do not expose a toggle solely to preserve an obsolete implementation detail.
+
+MCM hints compare Bellum and unmodded defaults where there is a meaningful counterpart; Bellum-only mechanics keep their own defaults. The comparisons were checked against Bannerlord **1.4.8**: `PrisonerReleaseCampaignBehavior.DailyHeroTick` uses 4% in settlements and `4% * (5 - min(81, healthy members)^0.25)` in travelling parties (8-20%), before the player-captor reduction and perks. Vanilla normally releases prisoners at peace. `DefaultAgeModel`, `DefaultMarriageModel` and `EducationCampaignBehavior.ChildStateToAge` supply the age comparisons. Bellum's deliberation delay is additional to, not a replacement for, `KingdomDecision`'s 48-hour response window. Recheck these references when updating the target game version, and keep attribute fallbacks and English localization entries synchronized.
+
+| Group | Important defaults |
+| --- | --- |
+| Presentation | Anglicized titles; Sovereign Title name display; both widgets on |
+| War/peace | Revamp on; reluctance 100 days (1-500); renewed-war peace interval 20 days (0-500), with client-liberation exemption |
+| Treaty wealth/captivity | 5,000 gold or 250 daily tribute per point; dungeon/mobile escape 1%/3% |
+| Court | One-year terms (0.25-4); five-day deliberation; rebellion threshold 100; automatic treason indictments on |
+| Titles/armies | Three-year fabrication; minimum two children for formation; restricted summons on; friend exception +60 relation |
+| Succession | Partition on; primary heir reserves one fief; player legal-heir enforcement on |
+| Childhood | Custom adulthood on at 16; education 2/5/8/10/13/15 |
+| Marriage | Strategic matching and Bellum-only NPC marriages on; ages respect adulthood |
+| Mercenaries | Limit 10, five-year evaluation, three officers, starting tier two |
+| Relations | Memory system on; duration 1x (0.25x-5x) |
+| Intrigue/notices | NPC subterfuge on; notifications Kingdom Only; debug messages off |
+
+Some saved/internal names retain older terminology, such as `EnableDynamicRelationDrift`. Read current code before interpreting them as the retired weekly-drift system.
+
+### Data and Load Order
+
+| File under `ModuleData/` | Purpose |
+| --- | --- |
+| `bellum_feudal_titles.xml` | Base hierarchy, records, and default styles |
+| `bellum_title_styles_*.xml` | Selectable presentation presets |
+| `bellum_feudal_titles_patch.xml` | Title/style and new-campaign clientage overrides from loaded modules |
+| `bellum_policy_agendas.xml` / `bellum_policy_agendas_patch.xml` | Crown interests and bloc stances |
+| `bellum_laws.xml` | Grouped law definitions |
+| `succession_config.xml` | Realm/cultural succession defaults |
+| `bellum_realm_names.xml` / `bellum_realm_names_patch.xml` | Localizable roots and native-name guards for Realm Identity mode |
+| `dynamic_mercenary_names.xml` / `dynamic_mercenary_names_patch.xml` | Cultural/generic name pools and overrides |
+| `bellum_concepts.xml` | Native encyclopedia definitions |
+| `Languages/EN/strings.xml` | English localization |
+
+Title configuration loads base hierarchy, selected preset, then active-module title patches. Shipped presets include Anglicized, Immersive, and BannerKings-compatible terminology; the latter is a style preset, not a promise of full BannerKings gameplay compatibility. Additional matching files are discovered for MCM. Restart after changing selection.
+
+Styles scope to kingdom, ruler culture, or holder culture, in that priority order. Temporary realms inherit the parent's style. Realm-wide court/council terminology uses kingdom, ruler culture, then realm culture. `CourtFactions` and `CouncilOffices` blocks customize institutional names, including finance/UI text. Realm-name patches can guard against overwriting unrelated map-mod identities.
+
+Extensions use settlement, title, kingdom, culture, and clan IDs. Use structured XML parsing; display-name matching is not a stable API.
+
+### Translating Names and Titles
+
+Bannerlord text uses `{=KEY}Fallback text`. Keep the key when translating its `<string id="KEY" text="..." />` entry in the target language's registered catalog. The inline fallback is used in English and when a translation is unavailable; changing only the fallback does not override an existing translation in another language. New keys must match between their references and catalog entries.
+
+Shipped title presets localize their labels, territorial roots, ranks, and formats. Unchanged Anglicized roots for Vlandia, Sturgia, Battania, and Khuzait reuse vanilla translation keys. Bellum-specific roots use `BC_TitleRoot_*`; terminology and formats use `BC_TitleStyle_*`. Preset and cultural contexts have separate keys so translating one does not change another. Preserve format variables such as `{TITLE_NOUN}`, `{TITLE_NAME}`, `{DISPLAY_TITLE}`, and `{HERO_NAME}`, while changing their order as the language requires.
+
+The active **Realm Name Display** mode determines which configuration supplies the name:
+
+- **Native:** the game's or conversion module's kingdom name and translation.
+- **Realm Identity:** `bellum_realm_names.xml` and its patches, unless the campaign has a remembered identity or player realm rename. The optional `nativeName` guard compares the translated native name. Keep it unchanged when replacing only `root`; omit it only when an unconditional identity override is intended.
+- **Sovereign Title:** the hierarchy title's root, including the selected title preset and `bellum_feudal_titles_patch.xml` overrides. Editing `bellum_realm_names.xml` does not affect this mode. Player title renames remain authoritative.
+
+For a custom localized Crown root in Sovereign Title mode, a title patch can contain:
+
+```xml
+<BellumFeudalTitles>
+  <TitleName id="bc_title_kingdom_vlandia" name="{=MyMod_Vlandia}My Vlandia" />
+</BellumFeudalTitles>
+```
+
+Register `<string id="MyMod_Vlandia" text="..." />` in the translation module's language catalog. Use a realm-name patch with `root="{=MyMod_Vlandia}My Vlandia"` instead for Realm Identity mode; its realm ID is `vlandia`, not the title ID or localization key.
+
+Title/style patches apply after the base hierarchy and selected preset, in active module order; later patches win. Bellum's own patch participates at its normal load position. Disabled modules' patches are ignored, and active modules outside the game's `Modules` directory are supported. This patch order is separate from preset discovery in MCM.
+
+Restart after editing configuration XML or translation catalogs. Displayed `TextObject` names and the realm-name cache respond to normal in-game language changes, but configuration files are not live-reloaded. `Tests/LocalizationCatalog.Tests.ps1` checks that all nonempty visible text in shipped presets has a key and that Bellum catalog fallbacks and variables agree; `--realm-names` also exercises real preset loading, translations, override order, and rename protections.
+
+## Persistence and Recovery
+
+[BellumCivileSaveDefiner.cs](BellumCivileSaveDefiner.cs) reserves base ID **8456123**. Behaviors serialize through `SyncData`; records and nested containers need explicit registration.
+
+Saved families include court affiliations/agendas, council state, titles/claims/drift, conflict membership/cleanup, war score/custody, treaties/payments/pacts/clients, delayed decisions, laws/elections/accessions, heirs/regencies, estate/union journals, marriage prospects, mercenary history, and relation memories/migrations.
+
+- Keep type, enum, and field identities stable; never reuse retired IDs.
+- Register new records and required nested containers. Compilation does not prove serialization.
+- Make migration idempotent and tolerant of partially initialized state. Rebuild transient indexes from saved authority.
+- Preserve healthy heirs and legal ownership. Cache expiry is not permission to reroll succession or reseed rights.
+- Record intent before irreversible native actions and completion after verification. Recover partial results rather than blindly retrying.
+- Distinguish invalidation from defeat, neglect, or a broken promise.
+- Test fresh and supported upgraded saves. Back up campaigns before migration tests; backward loading into older versions is not guaranteed.
+
+Union and Crown-partition journals are especially sensitive: native clan moves, kingdom creation/destruction, diplomacy, and estate delivery can emit further campaign events. Read the complete sequence and reconciliation helpers before adding a mutation.
+
+## Optional Integrations
+
+### Supported Mod API
+
+`BellumCivile.BellumIntegration` exposes the supported integration surface (`ApiVersion = 1`).
+It has no dependency on a particular companion mod. Call it on the **active campaign thread**, including
+when applying an asynchronously generated chat result. Calls without a campaign or from another thread
+throw `InvalidOperationException`; do not interpret that as permission to run a competing system.
+Optional integrations can discover this type and its methods by reflection and remain disabled when absent.
+Additive API extensions keep version 1; probe for the particular method/event when supporting older Bellum builds.
+
+| API | Contract |
+| --- | --- |
+| `ManagesRelationPair(first, second)` | Includes the enabled setting and Bellum's hero-pair eligibility. Temporary relation-patch suppression does not surrender ownership. |
+| `GetHostageStatus(hero)` | Returns a copied status, or null when no relevant reservation/captivity remains. Distinguishes reserved, active peace pledge, awaiting disposition and ordinary retained prisoner; also exposes expiry, agreement validity, protection and actual treaty custody. |
+| `GetCourtAgendas(realm)` | Copies current/retained agendas with persistent IDs, objective kind/target/action, enact/repeal direction, state and dates. Session dates are scheduling data, not record identity. |
+| `GetPendingVotes(realm)` | Read-only snapshots of open expulsion, fief allocation and council appointment votes, covering deliberation and unresolved ballots. Includes stable IDs, subjects, proposers and current candidate houses. |
+| `CouncilAppointmentDecided`, `GetRecentCouncilAppointments()` | Verified council ballot results, delivered on a later campaign tick and retained in saved recent history. Includes incumbent confirmations. |
+| `TryPledgePolicyVote`, `TryPledgeExpulsionVote`, `TryPledgeFiefVote`, `TryPledgeCouncilVote` | Validate a pending Bellum ballot, eligible choice and influence reservation before calling the existing setters. Return false with a localized reason when unavailable; existing promises are not overwritten. |
+| `CanBeginElectionPersuasion`, `TryBeginElectionPersuasion`, `CompleteElectionPersuasion` | Share native dialogue's relation requirement and once-per-speaker/realm court-term attempt limit. The returned attempt binds completion to the original election and term. |
+| `IsIllegitimate`, `MarkIllegitimate`, `Legitimize` | Explicit, saved, idempotent legitimacy support for companion mods. No hero is marked automatically. |
+| `PartitionCompleted`, `GetRecentPartitions()` | Committed inheritance notifications and a saved recent history, described below. |
+
+The influence pledge methods record an already negotiated agreement; the caller owns persuasion, payment
+and dialogue. Invoke the checked setter **before** taking payment and honor its return value. Policy
+`support` means support enforcing the proposed decision, including a proposed repeal; expulsion's
+`expel` means support expelling the target. Fief/council promises name a clan. Eligibility or actual
+influence can still change before voting; a promise cannot guarantee a future shortlist or funds.
+The older public setters remain available, but bypass these additional integration checks.
+
+`GetPendingVotes` returns an empty list for a null or eliminated realm. Each `PendingVoteSnapshot`
+has `Id`, `Kind`, `Stage`, `Realm`, `Proposer`, and the relevant `TargetClan`, `Settlement` or nullable
+`Office`. `ScheduledDay` is the planned campaign day during deliberation, not a guaranteed deadline;
+it is null once the ballot is open. `EligibleCandidates` copies the currently eligible fief/council
+houses. `LeadingNominees` copies up to three recorded nomination leaders during deliberation, or
+the stored council shortlist at ballot stage, filtered against current eligibility. Expulsions have
+empty candidate lists. These lists are provisional: they do not promise the final three candidates.
+Polling never opens an election, refreshes nominations, initializes council offices or commits support.
+Snapshots copy scalar data and collections; their native hero/clan/realm objects remain live game references.
+
+Vote IDs survive deliberation-to-ballot handoff and save/load; later proposals for the same subject
+receive different IDs. Old pending queues and unresolved ballots receive IDs when loaded, durable
+after the next save. Canceled/completed votes disappear from this query. Announced agendas without
+a queued vote, first-refusal choices, preliminary redistribution votes, policy votes and Crown
+elections are outside its scope. A listed pending vote does **not** guarantee that new promises can
+still be accepted: always use the corresponding `TryPledge*` method and honor its result.
+
+Subscribe to `CouncilAppointmentDecided` each campaign session. Its `CouncilAppointmentResultSnapshot`
+contains `VoteId` (matching the pending snapshot's `Id`), `Realm`, `Office`, `Winner`, `WinnerLeader`
+(captured at resolution), `PreviousHolder` (immediately before appointment), `IncumbentRetained`,
+and `CompletedDay`. Only successfully applied council ballots produce results; failed appointments,
+withdrawals and direct/startup appointments do not. This reports the outcome, not how each lord voted
+or whether a particular promise was honored. Delivery is outside ballot execution, on the campaign
+thread, and subscriber exceptions are isolated. The latest **100** delivered results are retained;
+undelivered results are also saved until dispatch. Read `GetRecentCouncilAppointments()` on session
+launch and deduplicate by `VoteId` in your own campaign-scoped history. Dispatched events are not
+replayed after loading, and pre-update completed appointments are not reconstructed.
+
+For a crown-election chat appeal, checking availability does not spend an attempt. Call `TryBegin...`
+when the player actually makes the appeal, then report its result:
+
+```csharp
+if (BellumIntegration.TryBeginElectionPersuasion(realm, lord, candidate, out var attempt, out var reason))
+{
+    // Return to the campaign thread after any external conversation processing.
+    bool pledged = BellumIntegration.CompleteElectionPersuasion(attempt, persuasionSucceeded);
+}
+```
+
+Unsuccessful or abandoned appeals consume the same saved allowance as Bellum's first dialogue argument.
+Attempt objects are session-only: do not serialize them, reuse them, or complete them after reloading.
+A changed mandate, expired term, existing promise or closed election prevents completion. This API
+does not spend influence or pay a bribe; standing crown elections and influence ballots are separate.
+
+Illegitimacy excludes the marked person from future hereditary Crown/clan succession, partition
+inheritance and blood-based claims through either parent. Descendants are assessed independently;
+elective Crown candidacy remains separate. Existing rulers, property, wards and recorded estate
+allocations are not confiscated or rewritten. Legitimation restores future eligibility and any
+otherwise-valid suspended blood claims. Heir/claim displays refresh when the marker changes.
+The native parent-child graph is untouched: companion mods must retain biological-parentage records
+separately. No additional mercenary-departure bonus is applied.
+
+Subscribe to `PartitionCompleted` each campaign session. Notifications describe completed ordinary,
+Crown and cross-clan partitions involving multiple recipient houses, with deceased, origin house/realm
+and recipient snapshots. Callbacks run on a subsequent campaign tick, outside inheritance execution;
+one failing subscriber does not interrupt settlement or other subscribers. The latest **100** results
+are retained after delivery. Read `GetRecentPartitions()` on session launch and deduplicate by `Id`
+against the bridge's own campaign-scoped history. Events already dispatched are not replayed after
+loading; queued, undispatched events are retained. Pre-update completed estates are not reconstructed.
+
+Agenda snapshots likewise retain the scheduler's existing lifetime, not a permanent archive. Resolved
+agendas generally disappear at the next term; reaction entries last until `ResultVisibleUntilDay`,
+and ongoing proceedings can last longer. Persist external narrative history independently. New IDs
+are backfilled for surviving old-save agendas and become durable when that campaign is saved.
+
+### Diplomacy
+
+Diplomacy is a soft integration and should load above Bellum. Bellum redirects its Factions button and supersedes the overlapping Overview while retaining compatible statistics/actions.
+
+With the revamp on, disable Diplomacy settings independently controlling overlapping exhaustion, proposal scheduling, or civil-war systems as identified by `DiplomacyCompatibilityBehavior`. In particular:
+
+- **Non-Aggression Pact Duration in Days: 0**
+- **Non-Aggression Pact Tendency: -100**
+- Diplomacy's minimum war duration: **0** when using Bellum's duration utility
+
+The warning waits until campaign UI is ready and returns on load while conflicts remain. Bellum reports incompatible settings; it does not change another mod's configuration. Reflection-based compatibility is build-sensitive and requires testing against supported external versions.
+
+### Mercenary Contracts
+
+Civil-war settlement ends temporary-realm mercenary contracts before completing the war tracker, removing the faction, or applying judgments. Blocked departures retain a saved outcome for daily retry; the affected clans remain mercenaries and occupied rebel shells are not destroyed. Existing saves initialize the new pending-outcome list empty.
+
+For Happy's Improved Mercenaries (`LongerMercenaryContracts`), `ModIntegrationHelper.ExecuteWithMercenarySettlementExit` temporarily enables its deliberate-exit flag around the native departure action, then restores the previous value. Normal departure callbacks retain control of influence payouts and contract cleanup. Bellum does not clear contract data in advance, call the penalized walk-away action, or change ordinary contract enforcement. Unknown departure blockers defer settlement instead of crashing.
+
+`--civil-war-mercenaries` tests blocked departures, initial outcomes, recovery and save-data persistence. Add `--mercenary-mod="path/to/LongerMercenaryContracts.dll"` to check the optional adapter against an installed DLL. `--civil-war-settlement` also runs adjacent peace, war-score and civil-war continuation checks. These harness tests use native-action doubles; campaign save/load and mod-stack retesting remain necessary.
+
+### Relations, Economy, and Banners
+
+True Noble Opinion integration retains hero-pair identity, including regular members/family. Verify displayed values, events, and save/load with and without it.
+
+HAP uses external requisition for Stockpile Provisions instead of direct food creation: up to 2% of eligible market food, subject to HAP capacity/supply. Bellum pays administration; HAP owns the food tooltip. Construction retains Bellum's modifier. See `CouncilAssignmentHapIntegration.cs`, `CouncilAssignmentRuntimePatches.cs`, and `BellumCouncilAssignmentModels.cs`.
+
+`KingdomVisualHelper` keeps two banner paths. Without an active POC policy or applicable Banner Color Persistence protection, native synchronization applies kingdom colors to clan banners, including on load. Multiple layers, mixed color fields and off-kingdom colors also occur in raw vanilla banners; they are not sufficient reasons to preserve artwork unless a custom-banner policy is active. Vanilla cadets receive generated sigils, and breakaway realms use their own uniform palette.
+
+Within the custom-banner path, layered artwork, mixed colors, non-kingdom palettes and explicitly configured POC house banners are preserved. Custom cadet banners copy the parent's artwork exactly; kingdom assignment and native synchronization keep a ruling house's personal banner separate from its kingdom banner. Completed realm unions and partitions refresh destination banner policies only after all transfer-receipt checks finish. Dynamic mercenary banners retain their existing generation rules. No new save fields are required. Native colors can be reapplied on load, but lost custom artwork cannot be reconstructed.
+
+`Patches/PocBannerCompatibility.cs` optionally adapts POC's internal realm-name reads: an explicitly configured displayed name wins, followed by a matching native realm name. This keeps sovereign-title display names from hiding POC's kingdom-specific uniforms and shield-pattern rules. It does not edit POC configuration files or select shield patterns. Explicit POC banner replacements, palette overrides and kingdom-color-following rules remain authoritative. Unsupported APIs are logged and left in POC's control.
+
+`Patches/BannerPersistenceCompatibility.cs` reads the loaded persistence module's current settings through cached optional accessors. Protection requires `BannerColorPersistenceEnabled` and either NPC protection or the player-led clan. Player-only protection does not opt NPC houses out of native coloring. Disabled or uninitialized settings do not enable Bellum's preservation path; unsupported APIs are logged and left to the persistence mod's own patches. Neither integration adds a required dependency or edits another mod's settings.
+
+`Patches/PocEquipmentOwnerCompatibility.cs` supplies the actual party's clan to POC's equipment fallback when available, with the hero's clan and POC's original cache as fallbacks. This prevents identical parent/cadet artwork from selecting the wrong house's settings; POC still owns pattern selection and equipment rendering.
+
+The engine harness's `--banner-compatibility` checks cover the installed game's raw clan banners, native color synchronization and serialization round trips, exact custom copies, cadet and kingdom creation, completed inheritance refreshes, ownership precedence and name resolution. Set `BellumTestPocModule` and/or `BellumTestBannerPersistenceModule` to the respective installed DLLs to exercise standalone and combined configuration and synchronization code, including NPC versus player-only persistence settings. These checks do not replace campaign save/load and battle-rendering tests; include parent/cadet parties with identical artwork in different realms.
+
+### Naval DLC / War Sails
+
+The `BellumCivile.NavalDLCPatch` project references Naval UI assemblies. Core startup registers its bundled DLL only when DLC is available. Core must remain buildable/loadable without Naval DLC.
+
+The companion also retains a separate module manifest declaring `v1.0.33`. Review that metadata if distributing a separate module. The core manifest does not update it; do not package both activation layouts without verifying registration behavior.
+
+## Build and Packaging
+
+### Prerequisites and Commands
+
+Build on Windows with a .NET SDK capable of SDK-style projects, .NET Framework 4.7.2 targeting support, target game assemblies, and installed Harmony/UIExtenderEx dependencies. NuGet supplies compile-time MCM, currently `Bannerlord.MCM` **5.11.4**. The lightweight Court harness separately targets **.NET 9**.
+
+`Directory.Build.props` supplies a shared `GameFolder` default based on Windows' Program Files (x86) location and the standard Steam library layout. It is independent of where the repository is cloned. An explicit `-p:GameFolder` takes priority over the `GameFolder` environment variable, which in turn overrides the default.
+
+From the repository root, select the installation below. For a custom Steam library or another storefront, replace `$game` with that installation's absolute path. Setting the environment variable also configures the PowerShell tests and engine harness for this session:
+
+```powershell
+$game = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Steam\steamapps\common\Mount & Blade II Bannerlord'
+$env:GameFolder = $game
+dotnet restore BellumCivile.csproj -p:GameFolder="$game"
+dotnet build BellumCivile.csproj -c Release --no-restore -p:GameFolder="$game"
+```
+
+For the companion, with Naval assemblies installed:
+
+```powershell
+dotnet build BellumCivile.NavalDLCPatch/BellumCivile.NavalDLCPatch.csproj -c Release -p:GameFolder="$game"
+```
+
+Its build copies the DLL/PDB into the main output. The solution builds both projects; use the core project directly on machines without Naval references.
+
+### Runtime Package
+
+Compilation is not deployment. The core project lists content but does not automatically assemble a full module. Prepare `Modules/BellumCivile/` with:
+
+```text
+BellumCivile/
+  SubModule.xml                  <- _Module/SubModule.xml
+  LICENSE.txt                    <- repository license
+  bin/Win64_Shipping_Client/
+    BellumCivile.dll              <- bin/Release/net472/
+    BellumCivile.NavalDLCPatch.dll <- bundled integration, when shipped
+  GUI/                           <- project GUI assets
+  ModuleData/                    <- configuration, concepts, and Languages
+```
+
+Ship manifest, XML, localization, and prefabs from the DLL's revision. A rebuilt DLL alone does not install Concepts articles. Do not redistribute game/dependency assemblies merely because they appear in test output.
+
+`main` is the development branch. Generated `bin/` and `obj/` outputs, local IDE/tool settings, and private research under `docs/` are excluded from source control. Keep credentials, saves, and logs out of commits as well. Build runtime packages from the tracked source and assets; a source checkout or Git push does not install or publish a packaged release.
+
+## Verification and Diagnostics
+
+### Regression Checks
+
+The repository includes focused checks and harnesses for maintaining the released systems. Choose the relevant layers when changing code:
+
+| Layer | What it establishes | Boundary |
+| --- | --- | --- |
+| Core/companion build | Compilation against installed references | No campaign transitions or serialization |
+| `Tests/*.Tests.ps1` | Focused rules, wiring, and compiled helper checks | Many use doubles or source assertions |
+| `Tests/CourtRedesignHarness` | Pure-rule checks and simulations | .NET 9, not the running game |
+| `Tests/SuccessionEngineHarness` | Contracts against installed game types and Bellum services | Not a native save roundtrip |
+| In-game testing | Menus, events, persistence, integrations, long-run balance | Observer runs do not cover every player branch |
+
+Examples from the repository root, using the `$game` path above:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File Tests/RealmSovereignty.Tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File Tests/GamePath.Tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File Tests/ChildhoodEducation.Tests.ps1 -GameFolder "$game"
+dotnet run --project Tests/CourtRedesignHarness/CourtRedesignHarness.csproj
+dotnet build Tests/SuccessionEngineHarness/SuccessionEngineHarness.csproj -p:GameFolder="$game"
+dotnet run --project Tests/SuccessionEngineHarness/SuccessionEngineHarness.csproj --no-build -- "$game"
+dotnet run --project Tests/SuccessionEngineHarness/SuccessionEngineHarness.csproj --no-build -- "$game" --title-name-cache
+dotnet run --project Tests/SuccessionEngineHarness/SuccessionEngineHarness.csproj --no-build -- "$game" --realm-names
+dotnet run --project Tests/SuccessionEngineHarness/SuccessionEngineHarness.csproj --no-build -- "$game" --starting-clientage
+dotnet run --project Tests/SuccessionEngineHarness/SuccessionEngineHarness.csproj --no-build -- "$game" --integration
+dotnet run --project Tests/SuccessionEngineHarness/SuccessionEngineHarness.csproj --no-build -- "$game" --inheritance-regression
+dotnet run --project Tests/SuccessionEngineHarness/SuccessionEngineHarness.csproj --no-build -- "$game" --council-captivity
+```
+
+Keep name-cache checks isolated because Harmony/JIT fixtures can affect other checks. Record results with the revision/environment rather than maintaining a stale passed-check count here.
+
+The engine harness accepts an installation path as its first positional argument, ahead of the `GameFolder` environment variable and the standard Steam default. `ChildhoodEducation.Tests.ps1` accepts `-GameFolder` with the same precedence. Court prototypes resolve Sandbox data through `GameFolder`; their existing `-ModuleData` parameter overrides that location. Prototypes supporting `-SyntheticOnly` can run without game data.
+
+`--realm-names` checks MCM preference migration and roundtrips, full/short/formal names, translated roots and word order, renames, cache invalidation, native save collector/value identity, and the optional Artem adapter against a minimal label-view double. It does not replace an in-game save/load and map-label check with the installed third-party mod.
+
+`--starting-clientage` checks real XML parsing/overrides, the new-game gate, graph validation, complete bloc diplomacy, scoped native alliance-event suppression, interrupted initialization, save compatibility, and prevention of reapplication after independence. War/peace actions and agreement delivery use test doubles; test a new campaign and save/reload with the intended conversion mod as well.
+
+`Tests/EncyclopediaConcepts.Tests.ps1` also compares text with the manuscript through `Tests/ConceptArticleSource.ps1`. It needs `docs/encyclopedia-articles-draft.md` and **cannot run unchanged in a clean clone without that private file**. The engine harness separately checks shipped Concepts XML/filter. Runtime has no manuscript dependency.
+
+### Logs and Console Tools
+
+Logs live under the user's Documents folder:
+
+```text
+Mount and Blade II Bannerlord/Configs/ModLogs/
+  BellumCivileYYYYMMDD.log
+  BellumCivileYYYYMMDD_1.log ...
+  bellumcivile_yearlyreports.txt
+```
+
+`BellumCivileLogger` rotates ordinary logs at about 5 MiB and prunes old dated logs after five days. Capture all numbered segments before expiry. Correlate yearly war/succession summaries with detailed transitions and campaign identity. Accelerated runs can skip telemetry opportunities; missing samples alone do not prove a mechanic failed.
+
+Treaty openings are counted by creation date; applied, rejected, and cancelled outcomes by their saved resolution date. Pending parleys are a current snapshot, and average war score spent includes applied treaties only. Older resolved proposals without a resolution timestamp are not assigned an invented year. Crown-heir regency creation and replacement contribute to the same succession counters as ordinary regencies.
+
+[CheatCommands.cs](CheatCommands.cs) contains diagnostics. Useful entries include `civilwars.make_me_king`, `civilwars.pending_votes`, `civilwars.repair_pending_votes`, `civilwars.relation_breakdown`, `civilwars.relation_stats [reset]`, and `civilwars.title_name_stats [reset]`, plus title, marriage, succession, treaty, client, and tribunal tools. Prefer commands exercising production services and reporting failed preconditions over direct record mutation.
+
+`civilwars.force_marriage_offer matrilineal` and `civilwars.force_marriage_offer patrilineal` send a normal marriage-offer notification for a random eligible house and player-clan pairing of that arrangement. Both legal household destinations are evaluated, so a matrilineal request can find a husband joining a player-clan sister as well as a player-clan brother leaving. Omit the arguments, or use `any`, to allow either type. Add a player-clan hero's StringId or exact display name after the mode to test a specific member: `civilwars.force_marriage_offer matrilineal <hero_id>`. The command bypasses scheduling/cooldown, not age, availability, reservations, NPC acceptance or household protections, and will not replace an active offer. Bellum strategic marriage must be enabled and the player clan must belong to an active kingdom. Search diagnostics are written to ModLogs even when no offer is found, including household restrictions and the closest refused match's acceptance score. The console identifies the spouses and departing member; open the notification to inspect the popup. Accepting completes a real marriage, so use a disposable test save.
+
+`Patches/KingdomManagementTabDiagnosticsPatch.cs` emits `KTAB-*` only with debug notifications enabled and a settled UI failing to bind. It reports relevant mixin/provider/command and optional Diplomacy state while remaining silent when healthy.
+
+### Performance Boundaries
+
+Existing optimizations focus on repeated reads without changing political rules:
+
+- Hero-name caches retain titled/untitled results with household/rulership context and a separate display revision.
+- A reverse hero-to-realm Crown-heir index avoids scanning every realm for non-heirs.
+- `TreatyDraftReadScope` reuses heir/prisoner/fief reads within one synchronous search; execution validates fresh state.
+- Marriage searches share local health/kinship/claim data; prospects retry only their pair.
+- Relation caches are bounded; expiry uses indexed checks and stable compaction.
+
+Do not retain search caches through settlement or serialize derived caches as authority. Invalidate on relevant events and keep campaign work staggered/event-driven. Avoid world scans in application/mission ticks.
+
+Measure performance changes with matched saves, modules, speed, and duration. Distinguish inclusive profiler samples from measured savings. Normal and accelerated runs answer different questions.
+
+## Maintenance
+
+### Change Discipline
+
+- Update authoritative services, then callers, reasoning, persistence, and focused tests.
+- Read all partial files before adding a scheduler or recovery path.
+- Scale tests to risk: ownership, relations, diplomacy, and succession need cross-system checks.
+- Use structured parsers, cache optional reflection, and prefer exact Harmony signatures where stable.
+- Keep visible text localized and technical diagnostics actionable.
+- Update this guide when rules/ownership change and the changelog for release-facing changes.
+- Preserve unrelated work and legitimate campaign history during repairs.
+
+### Extending a System
+
+| Change | Places to review together |
+| --- | --- |
+| New court motion | Objective source and selector registration, saved target/state, player selection, execution, success/failure/invalidation, payment/refund, and localized descriptions |
+| New council assignment | Assignment registry, runtime effects, model hooks, funding and competence scaling, incidents, and tooltips |
+| New treaty term | Term identity and persistence, eligibility, score cost and accounting, AI drafting, council utility, player editing, final execution, and rollback/recovery rules |
+| New relation memory | Stable source ID, personal/house scope, event context, duration and stacking rules, localization, and migration where needed |
+| New title or naming option | XML loader and precedence, ownership versus presentation, caches, tooltips, existing-save refresh, and player renames |
+| New transition stage | Saved intent/result fields, container registration, preconditions, native side effects, verification, recovery, and exactly-once outcome reporting |
+
+A court objective must be registered with `CourtAgendaBehavior.CreateObjectiveSelector` and use the shared agenda contracts. Adding only a menu option or a weighted candidate does not implement its lifecycle. Likewise, every treaty draft needs final validation against current state even if its picker previously declared the term valid.
+
+For bug reports, begin with the owning behavior's saved record and the corresponding action log. Establish the last verified stage and its current preconditions before changing state. A deferred journal may be correctly waiting for a siege, decision, hostage lifecycle, or conflicting commitment; it is not automatically a failed scheduler. Reproduce and distinguish that wait from a lost callback before adding recovery code.
+
+## License
+
+Bellum Civile by **Vonbalt** is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/). Unless otherwise noted, this applies to the project's original source code, documentation, and assets in this repository.
+
+You may share and adapt this material under the license's terms:
+
+- **Attribution:** credit Bellum Civile and Vonbalt, retain existing contributor and copyright notices, include the license text or a link to it, and indicate changes when sharing modified material.
+- **NonCommercial:** use and redistribution under this license must be for noncommercial purposes.
+- **ShareAlike:** shared adaptations must use the same license or another license permitted by its ShareAlike terms.
+
+The full terms are in [LICENSE.txt](LICENSE.txt); the summary above does not replace them. Bellum's release packages should include this file alongside the mod.
+
+Third-party code, libraries, game assets, and other separately licensed material remain subject to their respective licenses and attribution requirements. This license does not grant rights to TaleWorlds' game files or to other mods' material beyond the permissions their owners provide.

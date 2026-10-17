@@ -1,0 +1,20 @@
+$ErrorActionPreference = 'Stop'
+$root = Split-Path $PSScriptRoot -Parent
+function Read($path) { Get-Content -Raw -LiteralPath (Join-Path $root $path) }
+function Check($ok, $message) { if (!$ok) { throw $message }; "PASS: $message" }
+$council = Read 'Behaviors/CourtCouncilAgendas.cs'
+$source = Read 'CourtCouncilObjectiveSource.cs'
+$hub = Read 'Behaviors/CourtAgendaBehavior.cs'
+$behavior = Read 'Behaviors/PrivyCouncilBehavior.cs'
+$record = Read 'PrivyCouncilOfficeRecord.cs'
+Check (!$behavior.Contains('TryRelieveCaptiveOfficeHolder') -and !$behavior.Contains('CancelCaptiveCouncillorAssignment')) 'Capture neither dismisses the holder nor resets the assignment.'
+Check (!$council.Contains('MaintainCaptivityVacancyPriority') -and !$council.Contains('MarkCouncilCaptivityVacancy')) 'Capture cannot replace Crown business or clear council cooldowns.'
+Check (!$source.Contains('IsCaptivityAppointment') -and !$source.Contains('CrownEmergency')) 'New appointments use normal eligibility and affordability.'
+Check ($council.Contains('TryPay(agenda, CourtCouncilObjectiveSource.Cost(agenda.Sponsor))')) 'New filing uses the normal payment category.'
+Check ($source.Contains('IsCouncilOfficeSettled') -and $source.Contains('CourtTermDays')) 'Completed-contest cooldown and ordinary term gates remain.'
+Check ($council.Contains('LegacyCouncilExpense') -and $hub.Contains('LegacyCouncilExpense(agenda)')) 'Old paid motions retain their refund classification.'
+Check ($record.Contains('[SaveableField(17)] private bool _captivityVacancy;') -and !$record.Contains('VacateForCaptivity')) 'Legacy saved vacancy state remains readable without new writers.'
+Check ($behavior.Contains('candidate == incumbent || !candidate.Leader.IsPrisoner')) 'Captive incumbent is the only prisoner eligible for a retention ballot.'
+Check ($behavior.Contains('HeroPrisonerTaken.AddNonSerializedListener') -and $behavior.Contains('HeroPrisonerReleased.AddNonSerializedListener')) 'Capture and release refresh cached operational effects.'
+Check ($behavior.Contains('BellumCivile_PrivyCouncil_CaptivityDismissals')) 'Old captivity dismissal history remains in save data.'
+'Source contracts passed; engine transition checks are in the --council-captivity harness suite.'

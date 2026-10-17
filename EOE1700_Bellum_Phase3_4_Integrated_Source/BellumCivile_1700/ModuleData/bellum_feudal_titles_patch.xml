@@ -1,0 +1,91 @@
+<?xml version='1.0' encoding='utf-8'?>
+<BellumFeudalTitles>
+  <TitleStyle kingdom="aserai">
+    <Rank tier="Kingdom" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+    <Rank tier="Empire" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+  </TitleStyle>
+  <TitleStyle kingdom="austria">
+    <Rank tier="Kingdom" titleName="Archduchy" maleRank="Archduke" femaleRank="Archduchess" />
+    <Rank tier="Empire" titleName="Archduchy" maleRank="Archduke" femaleRank="Archduchess" />
+  </TitleStyle>
+  <TitleStyle kingdom="britain">
+    <Rank tier="Kingdom" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+    <Rank tier="Empire" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+  </TitleStyle>
+  <TitleStyle kingdom="cossack">
+    <Rank tier="Kingdom" titleName="Host" maleRank="Hetman" femaleRank="Hetman" />
+    <Rank tier="Empire" titleName="Host" maleRank="Hetman" femaleRank="Hetman" />
+  </TitleStyle>
+  <TitleStyle kingdom="crimea">
+    <Rank tier="Kingdom" titleName="Khanate" maleRank="Khan" femaleRank="Khanum" />
+    <Rank tier="Empire" titleName="Khanate" maleRank="Khan" femaleRank="Khanum" />
+  </TitleStyle>
+  <TitleStyle kingdom="denmark">
+    <Rank tier="Kingdom" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+    <Rank tier="Empire" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+  </TitleStyle>
+  <TitleStyle kingdom="dutch">
+    <Rank tier="Kingdom" titleName="Republic" maleRank="Grand Pensionary" femaleRank="Grand Pensionary" />
+    <Rank tier="Empire" titleName="Republic" maleRank="Grand Pensionary" femaleRank="Grand Pensionary" />
+  </TitleStyle>
+  <TitleStyle kingdom="genoa">
+    <Rank tier="Kingdom" titleName="Republic" maleRank="Doge" femaleRank="Dogaressa" />
+    <Rank tier="Empire" titleName="Republic" maleRank="Doge" femaleRank="Dogaressa" />
+  </TitleStyle>
+  <TitleStyle kingdom="germany">
+    <Rank tier="Kingdom" titleName="Empire" maleRank="Emperor" femaleRank="Empress" />
+    <Rank tier="Empire" titleName="Empire" maleRank="Emperor" femaleRank="Empress" />
+  </TitleStyle>
+  <TitleStyle kingdom="ottoman">
+    <Rank tier="Kingdom" titleName="Empire" maleRank="Sultan" femaleRank="Sultan" />
+    <Rank tier="Empire" titleName="Empire" maleRank="Sultan" femaleRank="Sultan" />
+  </TitleStyle>
+  <TitleStyle kingdom="persia">
+    <Rank tier="Kingdom" titleName="Empire" maleRank="Shah" femaleRank="Shah" />
+    <Rank tier="Empire" titleName="Empire" maleRank="Shah" femaleRank="Shah" />
+  </TitleStyle>
+  <TitleStyle kingdom="poland">
+    <Rank tier="Kingdom" titleName="Commonwealth" maleRank="King" femaleRank="Queen" />
+    <Rank tier="Empire" titleName="Commonwealth" maleRank="King" femaleRank="Queen" />
+  </TitleStyle>
+  <TitleStyle kingdom="pope">
+    <Rank tier="Kingdom" titleName="Papal States" maleRank="Pope" femaleRank="Pope" />
+    <Rank tier="Empire" titleName="Papal States" maleRank="Pope" femaleRank="Pope" />
+  </TitleStyle>
+  <TitleStyle kingdom="portugal">
+    <Rank tier="Kingdom" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+    <Rank tier="Empire" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+  </TitleStyle>
+  <TitleStyle kingdom="prussia">
+    <Rank tier="Kingdom" titleName="Electorate" maleRank="Elector" femaleRank="Electress" />
+    <Rank tier="Empire" titleName="Electorate" maleRank="Elector" femaleRank="Electress" />
+  </TitleStyle>
+  <TitleStyle kingdom="russia">
+    <Rank tier="Kingdom" titleName="Tsardom" maleRank="Tsar" femaleRank="Tsaritsa" />
+    <Rank tier="Empire" titleName="Tsardom" maleRank="Tsar" femaleRank="Tsaritsa" />
+  </TitleStyle>
+  <TitleStyle kingdom="spain">
+    <Rank tier="Kingdom" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+    <Rank tier="Empire" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+  </TitleStyle>
+  <TitleStyle kingdom="sweden">
+    <Rank tier="Kingdom" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+    <Rank tier="Empire" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+  </TitleStyle>
+  <TitleStyle kingdom="swiss">
+    <Rank tier="Kingdom" titleName="Confederation" maleRank="Presiding Magistrate" femaleRank="Presiding Magistrate" />
+    <Rank tier="Empire" titleName="Confederation" maleRank="Presiding Magistrate" femaleRank="Presiding Magistrate" />
+  </TitleStyle>
+  <TitleStyle kingdom="tuscany">
+    <Rank tier="Kingdom" titleName="Grand Duchy" maleRank="Grand Duke" femaleRank="Grand Duchess" />
+    <Rank tier="Empire" titleName="Grand Duchy" maleRank="Grand Duke" femaleRank="Grand Duchess" />
+  </TitleStyle>
+  <TitleStyle kingdom="venice">
+    <Rank tier="Kingdom" titleName="Republic" maleRank="Doge" femaleRank="Dogaressa" />
+    <Rank tier="Empire" titleName="Republic" maleRank="Doge" femaleRank="Dogaressa" />
+  </TitleStyle>
+  <TitleStyle kingdom="vlandia">
+    <Rank tier="Kingdom" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+    <Rank tier="Empire" titleName="Kingdom" maleRank="King" femaleRank="Queen" />
+  </TitleStyle>
+</BellumFeudalTitles>
